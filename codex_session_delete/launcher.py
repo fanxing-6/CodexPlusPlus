@@ -18,6 +18,7 @@ from codex_session_delete.api_adapter import ApiAdapter, UnavailableApiAdapter
 from codex_session_delete.backup_store import BackupStore
 from codex_session_delete.cdp import evaluate_user_scripts, inject_file, open_devtools
 from codex_session_delete.helper_server import HelperServer
+from codex_session_delete.markdown_exporter import MarkdownExportService
 from codex_session_delete.models import DeleteResult, DeleteStatus, SessionRef
 from codex_session_delete.storage_adapter import SQLiteStorageAdapter
 from codex_session_delete.user_scripts import UserScriptManager
@@ -264,8 +265,8 @@ def launch_codex_app(app_dir: Path, debug_port: int) -> Any:
     return subprocess.Popen(build_codex_command(app_dir, debug_port), env=env)
 
 
-def start_helper(service, host: str = "127.0.0.1", port: int = 57321) -> HelperServer:
-    server = InjectedHelperServer(host, port, service)
+def start_helper(service, export_service: MarkdownExportService | None = None, host: str = "127.0.0.1", port: int = 57321) -> HelperServer:
+    server = InjectedHelperServer(host, port, service, export_service=export_service)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -276,11 +277,25 @@ def shutdown_helper(server: HelperServer) -> None:
     server.server_close()
 
 
-def inject_with_retry(debug_port: int, script_path: Path, helper_port: int, service: ApiFirstDeleteService, runtime: CodexPlusRuntime, attempts: int = 20, delay: float = 0.5) -> Any:
+def inject_with_retry(
+    debug_port: int,
+    script_path: Path,
+    helper_port: int,
+    service: ApiFirstDeleteService,
+    export_service: MarkdownExportService,
+    runtime: CodexPlusRuntime,
+    attempts: int = 20,
+    delay: float = 0.5,
+) -> Any:
     last_error: Exception | None = None
     for _ in range(attempts):
         try:
-            injection = inject_file(debug_port, script_path, helper_port, lambda path, payload: handle_bridge_request(service, path, payload, runtime))
+            injection = inject_file(
+                debug_port,
+                script_path,
+                helper_port,
+                lambda path, payload: handle_bridge_request(service, export_service, path, payload, runtime),
+            )
             runtime.websocket_url = injection.websocket_url
             evaluate_user_scripts(injection.websocket_url, runtime.user_scripts.build_enabled_bundle())
             return injection.bridge_socket or injection.result
@@ -299,16 +314,17 @@ def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Pa
     debug_port = select_windows_loopback_port(debug_port)
     helper_port = select_windows_loopback_port(helper_port)
     service = ApiFirstDeleteService(UnavailableApiAdapter(), db_path, backup_dir)
+    export_service = MarkdownExportService(db_path)
     script_path = Path(__file__).parent / "inject" / "renderer-inject.js"
     builtin_user_scripts_dir = Path(__file__).parent / "user_scripts"
     user_config_dir = user_scripts_config_dir()
     user_script_manager = UserScriptManager(builtin_user_scripts_dir, user_config_dir / "user_scripts", user_config_dir / "user_scripts.json")
     runtime = CodexPlusRuntime(None, user_script_manager, debug_port)
-    server = start_helper(service, port=helper_port)
+    server = start_helper(service, export_service, port=helper_port)
     codex_proc = None
     try:
         codex_proc = launch_codex_app(resolved_app_dir, debug_port)
-        server.bridge_socket = inject_with_retry(debug_port, script_path, server.port, service, runtime)
+        server.bridge_socket = inject_with_retry(debug_port, script_path, server.port, service, export_service, runtime)
         return server, codex_proc
     except Exception:
         shutdown_helper(server)
@@ -336,7 +352,13 @@ def launch_and_inject(app_dir: Path | None, db_path: Path | None, backup_dir: Pa
         raise
 
 
-def handle_bridge_request(service: ApiFirstDeleteService, path: str, payload: dict[str, object], runtime: CodexPlusRuntime | None = None) -> dict[str, object]:
+def handle_bridge_request(
+    service: ApiFirstDeleteService,
+    export_service: MarkdownExportService,
+    path: str,
+    payload: dict[str, object],
+    runtime: CodexPlusRuntime | None = None,
+) -> dict[str, object]:
     if path == "/user-scripts/list" and runtime:
         return runtime.user_scripts.inventory()
     if path == "/user-scripts/set-enabled" and runtime:
@@ -361,4 +383,7 @@ def handle_bridge_request(service: ApiFirstDeleteService, path: str, payload: di
     if path == "/archived-thread":
         session = service.find_archived_thread_by_title(str(payload.get("title", "")))
         return {"session_id": session.session_id, "title": session.title} if session else {"session_id": "", "title": ""}
+    if path == "/export-markdown":
+        session = SessionRef(session_id=str(payload.get("session_id", "")), title=str(payload.get("title", "")))
+        return export_service.export(session).to_dict()
     return {"status": DeleteStatus.FAILED.value, "session_id": str(payload.get("session_id", "")), "message": "Unknown bridge path"}

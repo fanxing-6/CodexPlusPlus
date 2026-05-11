@@ -1,4 +1,5 @@
 from codex_session_delete.launcher import handle_bridge_request
+from codex_session_delete.models import ExportResult, ExportStatus
 from codex_session_delete.user_scripts import UserScriptManager
 
 
@@ -11,6 +12,11 @@ class FakeDeleteService:
 
     def find_archived_thread_by_title(self, title):
         return None
+
+
+class FakeExportService:
+    def export(self, session):
+        return ExportResult(ExportStatus.EXPORTED, session.session_id, "Exported", filename="thread.md", markdown="# Thread\n")
 
 
 class FakeRuntime:
@@ -45,7 +51,7 @@ def test_handle_bridge_request_lists_user_scripts(tmp_path):
     manager = UserScriptManager(builtin, user, tmp_path / "config.json")
     runtime = FakeRuntime(manager)
 
-    result = handle_bridge_request(FakeDeleteService(), "/user-scripts/list", {}, runtime)
+    result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/user-scripts/list", {}, runtime)
 
     assert result["enabled"] is True
     assert result["scripts"][0]["key"] == "builtin:demo.js"
@@ -55,8 +61,8 @@ def test_handle_bridge_request_updates_user_script_toggles(tmp_path):
     manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
     runtime = FakeRuntime(manager)
 
-    global_result = handle_bridge_request(FakeDeleteService(), "/user-scripts/set-enabled", {"enabled": False}, runtime)
-    script_result = handle_bridge_request(FakeDeleteService(), "/user-scripts/set-script-enabled", {"key": "user:a.js", "enabled": False}, runtime)
+    global_result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/user-scripts/set-enabled", {"enabled": False}, runtime)
+    script_result = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/user-scripts/set-script-enabled", {"key": "user:a.js", "enabled": False}, runtime)
 
     assert global_result["enabled"] is False
     assert script_result["scripts"] == []
@@ -67,11 +73,20 @@ def test_handle_bridge_request_reports_and_repairs_backend_status(tmp_path):
     manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
     runtime = FakeRuntime(manager)
 
-    status = handle_bridge_request(FakeDeleteService(), "/backend/status", {}, runtime)
-    repaired = handle_bridge_request(FakeDeleteService(), "/backend/repair", {}, runtime)
+    status = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/backend/status", {}, runtime)
+    repaired = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/backend/repair", {}, runtime)
 
     assert status == {"status": "ok", "message": "后端已连接"}
     assert runtime.repaired is True
     assert repaired == {"status": "ok", "message": "后端已修复"}
 
+
+def test_handle_bridge_request_exports_markdown(tmp_path):
+    manager = UserScriptManager(tmp_path / "builtin", tmp_path / "user", tmp_path / "config.json")
+    runtime = FakeRuntime(manager)
+
+    exported = handle_bridge_request(FakeDeleteService(), FakeExportService(), "/export-markdown", {"session_id": "s1", "title": "First"}, runtime)
+
+    assert exported["status"] == "exported"
+    assert exported["filename"] == "thread.md"
 

@@ -12,6 +12,7 @@ def test_renderer_script_exists_and_parses_with_node():
 def test_renderer_script_contains_hover_delete_contract():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
     assert "codex-delete-button" in text
+    assert "codex-session-actions" in text
     assert "MutationObserver" in text
     assert "confirmDelete" in text
     assert "/delete" in text
@@ -41,6 +42,7 @@ def test_renderer_script_positions_delete_button_without_affecting_layout():
     assert "right: 28px" in text
     assert "top: 50%" in text
     assert "transform: translateY(-50%)" in text
+    assert "display: inline-flex" in text
 
 
 
@@ -178,26 +180,26 @@ def test_renderer_script_toast_does_not_capture_page_interactions():
 def test_renderer_script_sidebar_delete_opens_on_pointerup_when_click_is_unreliable():
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
     assert "openDeleteConfirm" in text
-    assert "codexDeleteVersion = \"5\"" in text
-    assert "existingDeleteButtons.length === 1" in text
-    assert "existingDeleteButtons[0].dataset.codexDeleteVersion === codexDeleteVersion" in text
-    assert "existingDeleteButtons.forEach((button) => button.remove())" in text
+    assert "codexDeleteVersion = \"6\"" in text
+    assert "actionGroupFromRow" in text
+    assert "removeActionGroups(row)" in text
     assert "row.dataset.codexDeleteRow = \"false\"" in text
     assert "installDeleteButtonEventDelegation" in text
     assert "codexSessionDeleteDocumentDeleteHandler" in text
     assert "document.addEventListener(\"pointerup\", handler, true)" in text
     assert "document.addEventListener(\"click\", handler, true)" in text
-    assert "button.addEventListener(\"pointerup\", openDeleteConfirm, true)" in text
+    assert "deleteButton.dataset.codexDeleteVersion = codexDeleteVersion" in text
 
 
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
     assert "updateDeleteButtonOffsets" in text
-    assert "codexDeleteStyleVersion = \"4\"" in text
+    assert "codexDeleteStyleVersion = \"5\"" in text
     assert "right: 66px" in text
     assert "确认" in text
     assert "归档对话" in text
     assert "button.getAttribute(\"aria-label\")" in text
     assert "label === \"归档对话\"" in text
+    assert "button.classList.contains(exportButtonClass)" in text
 
 
     text = Path("codex_session_delete/inject/renderer-inject.js").read_text(encoding="utf-8")
@@ -256,6 +258,11 @@ def test_renderer_script_sidebar_delete_opens_on_pointerup_when_click_is_unrelia
     assert "archiveRowFromUnarchiveButton" in text
     assert "[role=\"listitem\"], [role=\"row\"]" in text
     assert "Archived conversations" in text
+    assert "data-codex-archive-row-action" in text
+    assert "textContent = \"导出\"" in text
+    assert "textContent = \"删除\"" in text
+    assert "insertAdjacentElement(\"afterend\", exportButton)" in text
+    assert "insertAdjacentElement(\"afterend\", deleteButton)" in text
 
 
 def test_renderer_script_uses_bridge_only_helper_calls():
@@ -266,6 +273,8 @@ def test_renderer_script_uses_bridge_only_helper_calls():
     assert "postJson(\"/delete\"" in text
     assert "postJson(\"/undo\"" in text
     assert "postJson(\"/archived-thread\"" in text
+    assert "postJson(\"/export-markdown\"" in text
+    assert "Blob([markdown]" in text
 
 
 def test_renderer_script_uses_chinese_delete_toast_fallbacks():
@@ -345,6 +354,7 @@ def test_renderer_script_includes_user_script_manager_ui_contract():
     assert "插件选项解锁" in text
     assert "特殊插件强制安装" in text
     assert "会话删除" in text
+    assert "Markdown 导出" in text
     assert "原生菜单栏位置" in text
     assert "nativeMenuPlacement: true" in text
     assert "关于 Codex++" in text
@@ -353,6 +363,7 @@ def test_renderer_script_includes_user_script_manager_ui_contract():
     assert "pluginEntryUnlock" in text
     assert "forcePluginInstall" in text
     assert "sessionDelete" in text
+    assert "markdownExport" in text
     assert "codex-plus-modal-overlay" in text
     assert "codex-plus-modal-content" in text
     assert "codex-plus-modal-header" in text
