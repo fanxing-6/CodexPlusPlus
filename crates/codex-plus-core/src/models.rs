@@ -59,6 +59,7 @@ pub struct ExportResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn session_ref_new_rejects_empty_session_id() {
@@ -77,6 +78,86 @@ mod tests {
                 session_id: "session-123".to_string(),
                 title: "My Session".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn delete_status_uses_snake_case_json_values() {
+        assert_eq!(
+            serde_json::to_value(DeleteStatus::ServerDeleted).unwrap(),
+            json!("server_deleted")
+        );
+        assert_eq!(
+            serde_json::from_value::<DeleteStatus>(json!("server_deleted")).unwrap(),
+            DeleteStatus::ServerDeleted
+        );
+    }
+
+    #[test]
+    fn export_status_uses_snake_case_json_values() {
+        assert_eq!(
+            serde_json::to_value(ExportStatus::Exported).unwrap(),
+            json!("exported")
+        );
+        assert_eq!(
+            serde_json::from_value::<ExportStatus>(json!("exported")).unwrap(),
+            ExportStatus::Exported
+        );
+    }
+
+    #[test]
+    fn delete_result_json_shape_matches_python_to_dict() {
+        let result = DeleteResult {
+            status: DeleteStatus::Partial,
+            session_id: "session-123".to_string(),
+            message: "deleted locally only".to_string(),
+            undo_token: Some("undo-123".to_string()),
+            backup_path: None,
+        };
+
+        let value = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "status": "partial",
+                "session_id": "session-123",
+                "message": "deleted locally only",
+                "undo_token": "undo-123",
+                "backup_path": null
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DeleteResult>(value).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn export_result_json_shape_matches_python_to_dict() {
+        let result = ExportResult {
+            status: ExportStatus::Exported,
+            session_id: "session-123".to_string(),
+            message: "exported markdown".to_string(),
+            filename: "session-123.md".to_string(),
+            markdown: "# Session\n\nBody".to_string(),
+        };
+
+        let value = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "status": "exported",
+                "session_id": "session-123",
+                "message": "exported markdown",
+                "filename": "session-123.md",
+                "markdown": "# Session\n\nBody"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ExportResult>(value).unwrap(),
+            result
         );
     }
 }
