@@ -235,11 +235,11 @@ const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:57321/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_plus_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket";
 const LOCAL_MOBILE_RELAY_URL = "ws://127.0.0.1:57323";
-const PUBLIC_MOBILE_RELAY_URL = "ws://154.201.90.76:57323";
+const PUBLIC_MOBILE_RELAY_URL = "wss://codex-plus-mobile-relay.fx-ai.space";
 
 const mobileRelayServers = [
+  { id: "fx-ai", label: "自建服务器", url: PUBLIC_MOBILE_RELAY_URL, capacity: 100 },
   { id: "local", label: "本机测试", url: LOCAL_MOBILE_RELAY_URL, capacity: 100 },
-  { id: "public-154", label: "公共服务器 1", url: PUBLIC_MOBILE_RELAY_URL, capacity: 100 },
 ];
 
 const emptyContextSelection = (): RelayContextSelection => ({
@@ -629,7 +629,7 @@ const defaultSettings: BackendSettings = {
   codexAppImageOverlayOpacity: 35,
   codexGoalsEnabled: false,
   mobileControlEnabled: false,
-  mobileControlRelayUrl: LOCAL_MOBILE_RELAY_URL,
+  mobileControlRelayUrl: PUBLIC_MOBILE_RELAY_URL,
   mobileControlRoom: "",
   mobileControlKey: "",
   launchMode: "patch",

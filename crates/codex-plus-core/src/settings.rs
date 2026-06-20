@@ -283,7 +283,7 @@ pub struct BackendSettings {
 }
 
 fn default_mobile_control_relay_url() -> String {
-    "ws://127.0.0.1:57323".to_string()
+    "wss://codex-plus-mobile-relay.fx-ai.space".to_string()
 }
 
 impl Default for BackendSettings {
@@ -1499,7 +1499,7 @@ experimental_bearer_token = "sk-existing""#
     fn settings_store_save_load_roundtrip_preserves_aggregate_relay_settings() {
         let dir = temp_dir();
         let store = SettingsStore::new(dir.join("settings.json"));
-        let settings = BackendSettings {
+        let settings = normalize_settings_config_sections(BackendSettings {
             relay_profiles: vec![
                 RelayProfile {
                     id: "relay-a".to_string(),
@@ -1536,7 +1536,7 @@ experimental_bearer_token = "sk-existing""#
             }],
             active_aggregate_relay_id: "agg".to_string(),
             ..BackendSettings::default()
-        };
+        });
 
         store.save(&settings).unwrap();
 
