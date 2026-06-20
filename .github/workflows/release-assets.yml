@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build, for example v1.2.17"
+        description: "Release tag to build, for example v1.2.18"
         required: true
-        default: "v1.2.17"
+        default: "v1.2.18"
 
 permissions:
   contents: write
@@ -45,7 +45,7 @@ jobs:
           version="${tag#v}"
           version="${version#V}"
           if [ -z "$version" ] || [ "$version" = "$tag" ]; then
-            echo "Release tag must look like v1.2.17; got: $tag" >&2
+            echo "Release tag must look like v1.2.18; got: $tag" >&2
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
