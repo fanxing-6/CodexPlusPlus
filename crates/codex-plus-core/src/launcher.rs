@@ -932,6 +932,37 @@ async fn handle_helper_connection(
                 "application/json; charset=utf-8".to_string(),
                 "helper.diagnostics_log_ok",
             )
+        } else if path == "/screenshot/capture" && matches!(method, "POST" | "OPTIONS") {
+            let result = if method == "POST" {
+                let payload = serde_json::from_str::<serde_json::Value>(request_body)
+                    .unwrap_or_else(|error| {
+                        serde_json::json!({
+                            "parse_error": error.to_string(),
+                            "raw": request_body
+                        })
+                    });
+                crate::screenshot::capture_screenshot_response(&payload)
+            } else {
+                serde_json::json!({
+                    "status": "ok",
+                    "message": "截图接口可用"
+                })
+            };
+            let ok = result
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                == "ok";
+            (
+                if ok { "200 OK" } else { "500 Internal Server Error" }.to_string(),
+                serde_json::to_vec(&result)?,
+                "application/json; charset=utf-8".to_string(),
+                if ok {
+                    "helper.screenshot_capture_ok"
+                } else {
+                    "helper.screenshot_capture_failed"
+                },
+            )
         } else if path == "/overlay/image" && matches!(method, "GET" | "OPTIONS") {
             if method == "OPTIONS" {
                 (

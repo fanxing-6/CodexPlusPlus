@@ -1066,6 +1066,10 @@ impl BridgeRuntimeService for FakeRuntime {
         )
     }
 
+    async fn capture_screenshot(&self, _payload: Value) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "files": []}))
+    }
+
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
         Ok(json!({
             "status": "ok",

@@ -22,6 +22,8 @@
   const zedRemoteButtonClass = "codex-zed-remote-button";
   const zedRemoteOpenInMenuItemClass = "codex-zed-open-in-menu-item";
   const zedRemoteToastClass = "codex-zed-remote-toast";
+  const screenshotButtonClass = "codex-screenshot-button";
+  const screenshotToastClass = "codex-screenshot-toast";
   const upstreamWorktreeDialogClass = "codex-upstream-worktree-dialog";
   const upstreamBranchOptionAttribute = "data-codex-upstream-branch-option";
   const upstreamBranchSelectionKey = "codexUpstreamBranchSelection";
@@ -41,7 +43,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "14";
+  const codexDeleteStyleVersion = "15";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
   const codexDeleteVersion = "7";
@@ -57,6 +59,7 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
+  const codexScreenshotButtonVersion = "1";
   let codexPlusVersion = window.__CODEX_PLUS_VERSION__ || "unknown";
   const codexPlusBuild = window.__CODEX_PLUS_BUILD__ || "unknown";
   const codexPlusSettingsKey = "codexPlusSettings";
@@ -259,6 +262,59 @@
       .codex-session-more-menu-icon {
         width: 16px;
         text-align: center;
+      }
+      .${screenshotButtonClass} {
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+        flex: 0 0 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text-secondary, var(--token-text-secondary, rgba(142,142,160,.95)));
+        padding: 0;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .${screenshotButtonClass} svg {
+        width: 18px;
+        height: 18px;
+        display: block;
+      }
+      .${screenshotButtonClass}:hover,
+      .${screenshotButtonClass}:focus-visible {
+        background: var(--token-bg-elevated-secondary, rgba(255,255,255,.08));
+        color: var(--text-primary, var(--token-text-primary, #f4f4f5));
+        outline: none;
+      }
+      .${screenshotButtonClass}[data-loading="true"] {
+        opacity: .62;
+        pointer-events: none;
+      }
+      .${screenshotToastClass} {
+        position: fixed;
+        left: 50%;
+        bottom: 92px;
+        transform: translateX(-50%);
+        z-index: 2147483300;
+        max-width: min(520px, calc(100vw - 32px));
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 8px;
+        background: rgba(32,34,36,.96);
+        color: #f4f4f5;
+        box-shadow: 0 18px 46px rgba(0,0,0,.28);
+        padding: 9px 12px;
+        font: 13px/18px system-ui, sans-serif;
+        text-align: center;
+        white-space: normal;
+        pointer-events: none;
+      }
+      .${screenshotToastClass}[data-status="failed"] {
+        border-color: rgba(248,113,113,.45);
+        color: #fecaca;
       }
       .${threadIdBadgeClass} {
         flex: 0 0 auto;
@@ -5800,6 +5856,290 @@
     return matching?.getBoundingClientRect?.() || rect || null;
   }
 
+  function screenshotIconSvg() {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path>
+        <circle cx="12" cy="13" r="3"></circle>
+      </svg>`;
+  }
+
+  function showScreenshotToast(message, status = "ok") {
+    const existing = document.querySelector(`.${screenshotToastClass}`);
+    existing?.remove();
+    const toast = document.createElement("div");
+    toast.className = screenshotToastClass;
+    toast.dataset.status = status;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    clearTimeout(window.__codexScreenshotToastTimer);
+    window.__codexScreenshotToastTimer = setTimeout(() => {
+      toast.remove();
+    }, status === "failed" ? 4200 : 2400);
+  }
+
+  function screenshotPointerPayload(event) {
+    const fallbackX = Math.round((Number(window.screenX) || 0) + (Number(window.innerWidth) || 0) / 2);
+    const fallbackY = Math.round((Number(window.screenY) || 0) + (Number(window.innerHeight) || 0) / 2);
+    const screenX = typeof event?.screenX === "number" && Number.isFinite(event.screenX)
+      ? Math.round(event.screenX)
+      : fallbackX;
+    const screenY = typeof event?.screenY === "number" && Number.isFinite(event.screenY)
+      ? Math.round(event.screenY)
+      : fallbackY;
+    return {
+      screenX,
+      screenY,
+      allDisplays: !!event?.altKey,
+    };
+  }
+
+  async function captureScreenshotFromHelper(payload) {
+    try {
+      const response = await fetch(`${helperBase}/screenshot/capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok && !result?.message) {
+        return { status: "failed", message: `截图接口返回 ${response.status}` };
+      }
+      return result;
+    } catch (error) {
+      const fallback = await postJson("/screenshot/capture", payload || {});
+      return fallback?.status ? fallback : { status: "failed", message: error?.message || "截图接口不可用" };
+    }
+  }
+
+  function screenshotFileFromPayload(filePayload) {
+    const binary = atob(filePayload?.dataBase64 || "");
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    const filename = filePayload?.filename || `codex-screenshot-${Date.now()}.png`;
+    return new File([bytes], filename, {
+      type: filePayload?.contentType || "image/png",
+      lastModified: Date.now(),
+    });
+  }
+
+  function screenshotDataTransfer(files) {
+    try {
+      const transfer = new DataTransfer();
+      files.forEach((file) => transfer.items.add(file));
+      return transfer;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function screenshotComposerRoot(anchor) {
+    const footer = anchor?.closest?.(".composer-footer") || codexServiceTierBestComposerFooter() || null;
+    if (!footer) return document;
+    let node = footer;
+    for (let depth = 0; node instanceof HTMLElement && depth < 7; depth += 1, node = node.parentElement) {
+      if (node.querySelector?.('textarea, [contenteditable="true"], [role="textbox"], input[type="file"]')) return node;
+    }
+    return footer;
+  }
+
+  function screenshotFileInputs(root) {
+    const seen = new Set();
+    const scopes = [root, document].filter(Boolean);
+    return scopes.flatMap((scope) => Array.from(scope.querySelectorAll?.('input[type="file"]') || []))
+      .filter((input) => {
+        if (!(input instanceof HTMLInputElement) || seen.has(input)) return false;
+        seen.add(input);
+        if (input.disabled) return false;
+        const accept = String(input.getAttribute("accept") || "").toLowerCase();
+        return !accept || accept.includes("image") || accept.includes("png") || accept.includes("*/*");
+      });
+  }
+
+  function attachScreenshotViaFileInput(files, root) {
+    const transfer = screenshotDataTransfer(files);
+    if (!transfer) return false;
+    for (const input of screenshotFileInputs(root)) {
+      try {
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  function screenshotTextTargets(root) {
+    const seen = new Set();
+    const selectors = 'textarea, [contenteditable="true"], [role="textbox"]';
+    return [root, document].filter(Boolean).flatMap((scope) => Array.from(scope.querySelectorAll?.(selectors) || []))
+      .filter((target) => {
+        if (!(target instanceof HTMLElement) || seen.has(target)) return false;
+        seen.add(target);
+        return visibleElement(target);
+      });
+  }
+
+  function dispatchScreenshotClipboardEvent(target, files) {
+    const transfer = screenshotDataTransfer(files);
+    if (!transfer) return false;
+    try {
+      const event = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: transfer,
+      });
+      const dispatched = target.dispatchEvent(event);
+      return event.defaultPrevented || !dispatched;
+    } catch (_) {
+      try {
+        const event = new Event("paste", { bubbles: true, cancelable: true });
+        Object.defineProperty(event, "clipboardData", { value: transfer });
+        const dispatched = target.dispatchEvent(event);
+        return event.defaultPrevented || !dispatched;
+      } catch (_) {
+        return false;
+      }
+    }
+  }
+
+  function attachScreenshotViaPaste(files, root) {
+    for (const target of screenshotTextTargets(root)) {
+      try {
+        target.focus?.();
+        if (dispatchScreenshotClipboardEvent(target, files)) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  function attachScreenshotViaDrop(files, root) {
+    const transfer = screenshotDataTransfer(files);
+    if (!transfer) return false;
+    const candidates = [root, ...Array.from(root?.querySelectorAll?.(".composer-footer, textarea, [contenteditable='true'], [role='textbox']") || [])]
+      .filter((target) => target instanceof HTMLElement && visibleElement(target));
+    for (const target of candidates) {
+      try {
+        const event = new DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: transfer,
+        });
+        const dispatched = target.dispatchEvent(event);
+        if (event.defaultPrevented || !dispatched) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  function attachScreenshotFiles(files, anchor) {
+    const root = screenshotComposerRoot(anchor);
+    return attachScreenshotViaFileInput(files, root) ||
+      attachScreenshotViaPaste(files, root) ||
+      attachScreenshotViaDrop(files, root);
+  }
+
+  async function captureAndAttachScreenshot(event, button) {
+    button.dataset.loading = "true";
+    button.setAttribute("aria-busy", "true");
+    showScreenshotToast(event?.altKey ? "正在截取全部显示器..." : "正在截图...");
+    try {
+      const result = await captureScreenshotFromHelper(screenshotPointerPayload(event));
+      if (result?.status !== "ok") {
+        throw new Error(result?.message || "截图失败");
+      }
+      const files = Array.isArray(result.files) ? result.files.map(screenshotFileFromPayload) : [];
+      if (!files.length) throw new Error("截图结果为空");
+      if (!attachScreenshotFiles(files, button)) {
+        throw new Error("未找到当前对话的附件入口");
+      }
+      showScreenshotToast(files.length > 1 ? `已添加 ${files.length} 张截图` : "已添加截图");
+    } catch (error) {
+      showScreenshotToast(error?.message || String(error), "failed");
+      sendCodexPlusDiagnostic("screenshot_capture_failed", {
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+    } finally {
+      delete button.dataset.loading;
+      button.removeAttribute("aria-busy");
+    }
+  }
+
+  function screenshotPlusButton(footer) {
+    const buttons = Array.from(footer?.querySelectorAll?.("button, [role='button']") || [])
+      .filter((button) => !button.closest?.(`.${screenshotButtonClass}`))
+      .filter(visibleElement)
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return (leftRect.left - rightRect.left) || (leftRect.top - rightRect.top);
+      });
+    const plusLike = buttons.find((button) => {
+      const label = [
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.textContent,
+      ].filter(Boolean).join(" ").trim();
+      return /(^|\s)\+(\s|$)|attach|upload|file|image|photo|add|添加|上传|附件|文件|图片|照片/i.test(label);
+    });
+    return plusLike || buttons[0] || null;
+  }
+
+  function screenshotButtonPlacement() {
+    const footer = codexServiceTierBestComposerFooter() || Array.from(document.querySelectorAll(".composer-footer")).filter(visibleElement)[0] || null;
+    if (!footer) return null;
+    const plusButton = screenshotPlusButton(footer);
+    if (plusButton?.parentElement) {
+      return { parent: plusButton.parentElement, before: plusButton.nextSibling };
+    }
+    return { parent: footer, before: footer.firstChild };
+  }
+
+  function wireScreenshotButton(button) {
+    if (button.dataset.codexScreenshotWired === codexScreenshotButtonVersion) return;
+    button.dataset.codexScreenshotWired = codexScreenshotButtonVersion;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      if (button.dataset.loading === "true") return;
+      void captureAndAttachScreenshot(event, button);
+    }, true);
+  }
+
+  function installScreenshotButton() {
+    const placement = screenshotButtonPlacement();
+    const existingButtons = Array.from(document.querySelectorAll(`.${screenshotButtonClass}`));
+    if (!placement?.parent) {
+      existingButtons.forEach((button) => button.remove());
+      return;
+    }
+    let button = existingButtons[0] || null;
+    existingButtons.forEach((node) => {
+      if (node !== button) node.remove();
+    });
+    if (!button || button.dataset.codexScreenshotButtonVersion !== codexScreenshotButtonVersion) {
+      button?.remove();
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = screenshotButtonClass;
+      button.dataset.codexScreenshotButtonVersion = codexScreenshotButtonVersion;
+      button.dataset.codexScreenshotButton = "true";
+      button.setAttribute("aria-label", "截图");
+      button.setAttribute("title", "截图；按住 Alt/Option 点击可截取全部显示器");
+      button.innerHTML = screenshotIconSvg();
+    }
+    wireScreenshotButton(button);
+    const before = placement.before?.parentElement === placement.parent ? placement.before : null;
+    if (button.parentElement !== placement.parent || button.nextSibling !== before) {
+      placement.parent.insertBefore(button, before);
+    }
+  }
+
   function sidebarProjectRows() {
     const section = projectsSection?.();
     return [...document.querySelectorAll('[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]')]
@@ -8586,6 +8926,7 @@
     refreshConversationTimeline();
     refreshConversationView();
     installCodexServiceTierBadge();
+    installScreenshotButton();
     scheduleThreadScrollSync();
     refreshCodexModelWhitelistFromScan(window.__codexSessionDeleteLastMutations);
   }
@@ -8605,7 +8946,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .codex-zed-remote-button, .codex-zed-remote-toast, #codex-plus-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${screenshotButtonClass}, .${screenshotToastClass}, .codex-zed-remote-button, .codex-zed-remote-toast, #codex-plus-menu`);
   }
 
   function scanRelevantSelector() {

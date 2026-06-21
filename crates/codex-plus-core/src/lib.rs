@@ -25,6 +25,7 @@ pub mod relay_rotation;
 pub mod relay_switch;
 pub mod routes;
 pub mod script_market;
+pub mod screenshot;
 pub mod settings;
 pub mod status;
 pub mod update;
