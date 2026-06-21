@@ -43,7 +43,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "15";
+  const codexDeleteStyleVersion = "16";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
   const codexDeleteVersion = "7";
@@ -59,7 +59,7 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
-  const codexScreenshotButtonVersion = "1";
+  const codexScreenshotButtonVersion = "2";
   let codexPlusVersion = window.__CODEX_PLUS_VERSION__ || "unknown";
   const codexPlusBuild = window.__CODEX_PLUS_BUILD__ || "unknown";
   const codexPlusSettingsKey = "codexPlusSettings";
@@ -5846,6 +5846,128 @@
     return !!rect && rect.width > 0 && rect.height > 0;
   }
 
+  function screenshotEditableSelector() {
+    return [
+      "textarea",
+      "[contenteditable='true']",
+      "[contenteditable='']",
+      "[role='textbox']",
+      "input:not([type])",
+      "input[type='text']",
+      "input[type='search']",
+    ].join(", ");
+  }
+
+  function isScreenshotEditableTarget(node) {
+    if (!(node instanceof HTMLElement) || !node.isConnected || isExtensionUiNode(node)) return false;
+    if (!visibleElement(node)) return false;
+    if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+      if (node.disabled || node.readOnly) return false;
+      const type = String(node.getAttribute("type") || "text").toLowerCase();
+      if (node instanceof HTMLInputElement && !["", "text", "search"].includes(type)) return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom < window.innerHeight * 0.35) return false;
+    return true;
+  }
+
+  function screenshotEditableTargets(root = document) {
+    const seen = new Set();
+    return Array.from(root?.querySelectorAll?.(screenshotEditableSelector()) || [])
+      .filter((node) => {
+        if (seen.has(node)) return false;
+        seen.add(node);
+        return isScreenshotEditableTarget(node);
+      })
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return (rightRect.bottom - leftRect.bottom) || (rightRect.width - leftRect.width);
+      });
+  }
+
+  function screenshotFileInputTargets(root = document) {
+    return Array.from(root?.querySelectorAll?.('input[type="file"]') || [])
+      .filter((input) => input instanceof HTMLInputElement && !input.disabled && !isExtensionUiNode(input));
+  }
+
+  function screenshotControlButtons(root = document) {
+    return Array.from(root?.querySelectorAll?.("button, [role='button']") || [])
+      .filter((button) => !button.closest?.(`.${screenshotButtonClass}`))
+      .filter((button) => !isExtensionUiNode(button))
+      .filter(visibleElement)
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return (rightRect.bottom - leftRect.bottom) || (leftRect.left - rightRect.left);
+      });
+  }
+
+  function screenshotElementIdentityText(node) {
+    return [
+      node?.id,
+      node?.className,
+      node?.getAttribute?.("data-testid"),
+      node?.getAttribute?.("aria-label"),
+      node?.getAttribute?.("placeholder"),
+      node?.getAttribute?.("name"),
+    ].filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function screenshotComposerRootScore(root, target) {
+    if (!(root instanceof HTMLElement) || !visibleElement(root) || isExtensionUiNode(root)) return -Infinity;
+    const rect = root.getBoundingClientRect();
+    if (rect.width < 180 || rect.height < 24) return -Infinity;
+    const buttons = screenshotControlButtons(root);
+    const files = screenshotFileInputTargets(root);
+    const editables = screenshotEditableTargets(root);
+    if (target && !root.contains(target)) return -Infinity;
+    if (!editables.length && !files.length) return -Infinity;
+    let score = 0;
+    if (root.matches?.(".composer-footer")) score += 80;
+    if (root.querySelector?.(".composer-footer")) score += 45;
+    if (root.matches?.("form")) score += 32;
+    if (/composer|prompt|chat|message|input/.test(screenshotElementIdentityText(root))) score += 28;
+    if (files.length) score += 24;
+    if (buttons.length) score += Math.min(28, buttons.length * 5);
+    if (editables.length) score += 18;
+    if (rect.bottom > window.innerHeight * 0.68) score += 22;
+    if (rect.width > Math.min(420, window.innerWidth * 0.42)) score += 12;
+    if (target && root !== target) score += 8;
+    if (root === target) score -= 24;
+    return score;
+  }
+
+  function screenshotRootFromEditable(target) {
+    let best = null;
+    for (let node = target, depth = 0; node instanceof HTMLElement && depth <= 10; node = node.parentElement, depth += 1) {
+      const score = screenshotComposerRootScore(node, target) - depth;
+      if (!best || score > best.score) best = { node, score, depth };
+      if (node.matches?.("form")) break;
+    }
+    return best?.score > -Infinity ? best.node : null;
+  }
+
+  function screenshotBestComposerRoot(root = document) {
+    const legacyFooter = codexServiceTierBestComposerFooter(root) ||
+      Array.from(root?.querySelectorAll?.(".composer-footer") || []).filter(visibleElement)[0] ||
+      null;
+    if (legacyFooter) return legacyFooter;
+
+    const explicitComposer = conversationViewFindComposerEl();
+    if (explicitComposer && root.contains?.(explicitComposer) && screenshotComposerRootScore(explicitComposer) > -Infinity) {
+      return explicitComposer;
+    }
+
+    const candidates = screenshotEditableTargets(root)
+      .map((target) => screenshotRootFromEditable(target))
+      .filter(Boolean);
+    const unique = Array.from(new Set(candidates));
+    return unique
+      .map((node, index) => ({ node, index, score: screenshotComposerRootScore(node) }))
+      .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.node || null;
+  }
+
   function effectiveElementRect(node) {
     if (!(node instanceof Element)) return null;
     const rect = node.getBoundingClientRect?.();
@@ -5936,13 +6058,13 @@
   }
 
   function screenshotComposerRoot(anchor) {
-    const footer = anchor?.closest?.(".composer-footer") || codexServiceTierBestComposerFooter() || null;
-    if (!footer) return document;
-    let node = footer;
+    const scopedRoot = anchor?.closest?.(".composer-footer") || screenshotBestComposerRoot(anchor?.closest?.("form") || document) || screenshotBestComposerRoot() || null;
+    if (!scopedRoot) return document;
+    let node = scopedRoot;
     for (let depth = 0; node instanceof HTMLElement && depth < 7; depth += 1, node = node.parentElement) {
       if (node.querySelector?.('textarea, [contenteditable="true"], [role="textbox"], input[type="file"]')) return node;
     }
-    return footer;
+    return scopedRoot;
   }
 
   function screenshotFileInputs(root) {
@@ -5974,12 +6096,12 @@
 
   function screenshotTextTargets(root) {
     const seen = new Set();
-    const selectors = 'textarea, [contenteditable="true"], [role="textbox"]';
+    const selectors = screenshotEditableSelector();
     return [root, document].filter(Boolean).flatMap((scope) => Array.from(scope.querySelectorAll?.(selectors) || []))
       .filter((target) => {
         if (!(target instanceof HTMLElement) || seen.has(target)) return false;
         seen.add(target);
-        return visibleElement(target);
+        return isScreenshotEditableTarget(target);
       });
   }
 
@@ -6019,7 +6141,7 @@
   function attachScreenshotViaDrop(files, root) {
     const transfer = screenshotDataTransfer(files);
     if (!transfer) return false;
-    const candidates = [root, ...Array.from(root?.querySelectorAll?.(".composer-footer, textarea, [contenteditable='true'], [role='textbox']") || [])]
+    const candidates = [root, ...Array.from(root?.querySelectorAll?.(`.composer-footer, ${screenshotEditableSelector()}`) || [])]
       .filter((target) => target instanceof HTMLElement && visibleElement(target));
     for (const target of candidates) {
       try {
@@ -6070,9 +6192,7 @@
   }
 
   function screenshotPlusButton(footer) {
-    const buttons = Array.from(footer?.querySelectorAll?.("button, [role='button']") || [])
-      .filter((button) => !button.closest?.(`.${screenshotButtonClass}`))
-      .filter(visibleElement)
+    const buttons = screenshotControlButtons(footer)
       .sort((left, right) => {
         const leftRect = left.getBoundingClientRect();
         const rightRect = right.getBoundingClientRect();
@@ -6090,11 +6210,15 @@
   }
 
   function screenshotButtonPlacement() {
-    const footer = codexServiceTierBestComposerFooter() || Array.from(document.querySelectorAll(".composer-footer")).filter(visibleElement)[0] || null;
+    const footer = screenshotBestComposerRoot();
     if (!footer) return null;
     const plusButton = screenshotPlusButton(footer);
     if (plusButton?.parentElement) {
       return { parent: plusButton.parentElement, before: plusButton.nextSibling };
+    }
+    const firstButton = screenshotControlButtons(footer)[0] || null;
+    if (firstButton?.parentElement) {
+      return { parent: firstButton.parentElement, before: firstButton.nextSibling };
     }
     return { parent: footer, before: footer.firstChild };
   }
@@ -8962,6 +9086,11 @@
       '[class*="user-message"]',
       '[class*="UserMessage"]',
       ".composer-footer",
+      "textarea",
+      "[contenteditable='true']",
+      "[contenteditable='']",
+      "[role='textbox']",
+      "input[type='file']",
       selectors.appHeader,
       selectors.archiveNav,
       ...(pluginPatchDisabledInRelayMode() ? [] : [selectors.disabledInstallButton]),
