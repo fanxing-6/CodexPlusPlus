@@ -2214,7 +2214,9 @@ function MobileControlScreen({
               const itemDetail = itemStatus
                 ? `在线 · ${itemStatus.rooms} 个房间 · ${formatBytes(itemStatus.forwardedBytes)}`
                 : itemSnapshot?.error || "尚未刷新";
-              const loadLabel = itemStatus ? `${load}/${server.capacity}` : itemSnapshot?.error ? "不可验证" : `-/${server.capacity}`;
+              const loadLabel = itemStatus
+                ? `${load} 在线 · 容量 ${server.capacity}`
+                : itemSnapshot?.error ? "不可验证" : "尚未刷新";
               return (
                 <button
                   className={`mobile-server-card ${isActive ? "active" : ""}`}
@@ -2238,10 +2240,14 @@ function MobileControlScreen({
               <Input readOnly value={selectedServer.url} />
             </Label>
             <Label className="field">
-              <span>容量</span>
+              <span>负载</span>
               <Input
                 readOnly
-                value={selectedStatus ? `${serverLoad}/${serverCapacity}` : selectedSnapshot?.error ? "不可验证" : "尚未刷新"}
+                value={
+                  selectedStatus
+                    ? `${serverLoad} 个在线连接 · 标称容量 ${serverCapacity}`
+                    : selectedSnapshot?.error ? "不可验证" : "尚未刷新"
+                }
               />
             </Label>
           </div>

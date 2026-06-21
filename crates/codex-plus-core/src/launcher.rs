@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -1945,12 +1947,10 @@ fn app_server_port_from_url(value: &str) -> Option<u16> {
 
 async fn start_app_server_runtime() -> anyhow::Result<AppServerRuntime> {
     let port = reserve_app_server_port()?;
-    let codex = resolve_codex_cli_path();
-    let mut command = Command::new(&codex);
+    let listen_url = format!("ws://127.0.0.1:{port}");
+    let codex = resolve_codex_cli_command();
+    let mut command = codex.command(&["app-server", "--listen", &listen_url]);
     command
-        .arg("app-server")
-        .arg("--listen")
-        .arg(format!("ws://127.0.0.1:{port}"))
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1959,7 +1959,7 @@ async fn start_app_server_runtime() -> anyhow::Result<AppServerRuntime> {
     command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
     let child = command
         .spawn()
-        .with_context(|| format!("无法启动 Codex app-server：{codex}"))?;
+        .with_context(|| format!("无法启动 Codex app-server：{}", codex.display()))?;
     wait_for_app_server_ready(port).await?;
     Ok(AppServerRuntime {
         port,
@@ -1968,15 +1968,235 @@ async fn start_app_server_runtime() -> anyhow::Result<AppServerRuntime> {
     })
 }
 
-fn resolve_codex_cli_path() -> String {
-    std::env::var("CODEX_CLI_PATH")
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CodexCliCommand {
+    Direct { program: String },
+    NodeShim {
+        node: String,
+        script: String,
+        display: String,
+    },
+    #[cfg(windows)]
+    CmdShim { path: String },
+    #[cfg(windows)]
+    PowerShellScript { path: String },
+}
+
+impl CodexCliCommand {
+    fn command(&self, args: &[&str]) -> Command {
+        match self {
+            Self::Direct { program } => {
+                let mut command = Command::new(program);
+                command.args(args);
+                command
+            }
+            Self::NodeShim { node, script, .. } => {
+                let mut command = Command::new(node);
+                command.arg(script);
+                command.args(args);
+                command
+            }
+            #[cfg(windows)]
+            Self::CmdShim { path } => {
+                let mut parts = vec![windows_cmd_quote(path)];
+                parts.extend(args.iter().map(|arg| windows_cmd_quote(arg)));
+                let command_line = parts.join(" ");
+                let mut command = Command::new("cmd.exe");
+                command.args(["/d", "/s", "/c"]);
+                command.arg(command_line);
+                command
+            }
+            #[cfg(windows)]
+            Self::PowerShellScript { path } => {
+                let mut command = Command::new("powershell.exe");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path]);
+                command.args(args);
+                command
+            }
+        }
+    }
+
+    fn display(&self) -> &str {
+        match self {
+            Self::Direct { program } => program,
+            Self::NodeShim { display, .. } => display,
+            #[cfg(windows)]
+            Self::CmdShim { path } => path,
+            #[cfg(windows)]
+            Self::PowerShellScript { path } => path,
+        }
+    }
+}
+
+fn resolve_codex_cli_command() -> CodexCliCommand {
+    if let Some(command) = std::env::var("CODEX_CLI_PATH")
         .ok()
         .filter(|path| !path.trim().is_empty())
-        .filter(|path| Path::new(path).is_file())
+        .map(|path| codex_command_from_target(path.trim()))
+    {
+        return command;
+    }
+
+    if let Some(path) = resolve_spawnable_real_codex() {
+        return codex_command_from_path(&path);
+    }
+
+    #[cfg(windows)]
+    if let Some(path) = find_codex_on_path() {
+        return codex_command_from_path(&path);
+    }
+
+    #[cfg(windows)]
+    {
+        CodexCliCommand::CmdShim {
+            path: "codex".to_string(),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        CodexCliCommand::Direct {
+            program: "codex".to_string(),
+        }
+    }
+}
+
+fn codex_command_from_target(target: &str) -> CodexCliCommand {
+    let path = Path::new(target);
+    if path.is_file() {
+        return codex_command_from_path(path);
+    }
+
+    #[cfg(windows)]
+    {
+        CodexCliCommand::CmdShim {
+            path: target.to_string(),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        CodexCliCommand::Direct {
+            program: target.to_string(),
+        }
+    }
+}
+
+fn codex_command_from_path(path: &Path) -> CodexCliCommand {
+    #[cfg(windows)]
+    {
+        if let Some(command) = npm_codex_shim_command(path) {
+            return command;
+        }
+        let path_text = path.to_string_lossy().to_string();
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+            return CodexCliCommand::CmdShim { path: path_text };
+        }
+        if extension.eq_ignore_ascii_case("ps1") {
+            return CodexCliCommand::PowerShellScript { path: path_text };
+        }
+        return CodexCliCommand::Direct { program: path_text };
+    }
+
+    #[cfg(not(windows))]
+    {
+        CodexCliCommand::Direct {
+            program: path.to_string_lossy().to_string(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn npm_codex_shim_command(path: &Path) -> Option<CodexCliCommand> {
+    let extension = path.extension().and_then(|value| value.to_str())?;
+    if !extension.eq_ignore_ascii_case("cmd") && !extension.eq_ignore_ascii_case("bat") {
+        return None;
+    }
+    let dir = path.parent()?;
+    let script = dir
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("bin")
+        .join("codex.js");
+    if !script.is_file() {
+        return None;
+    }
+    let bundled_node = dir.join("node.exe");
+    let node = if bundled_node.is_file() {
+        bundled_node.to_string_lossy().to_string()
+    } else {
+        "node".to_string()
+    };
+    Some(CodexCliCommand::NodeShim {
+        node,
+        script: script.to_string_lossy().to_string(),
+        display: path.to_string_lossy().to_string(),
+    })
+}
+
+fn resolve_spawnable_real_codex() -> Option<PathBuf> {
+    crate::cli_wrapper::default_user_runtime_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
         .or_else(|| {
-            crate::cli_wrapper::resolve_real_codex().map(|path| path.to_string_lossy().to_string())
+            let app_dir = crate::app_paths::resolve_codex_app_dir(None);
+            crate::cli_wrapper::packaged_codex_candidates(app_dir.as_deref())
+                .into_iter()
+                .find(|path| path.is_file() && !is_unspawnable_windowsapps_path(path))
         })
-        .unwrap_or_else(|| "codex".to_string())
+}
+
+#[cfg(windows)]
+fn is_unspawnable_windowsapps_path(path: &Path) -> bool {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .split('\\')
+        .any(|part| part.eq_ignore_ascii_case("WindowsApps"))
+}
+
+#[cfg(not(windows))]
+fn is_unspawnable_windowsapps_path(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn find_codex_on_path() -> Option<PathBuf> {
+    let output = StdCommand::new("where.exe").arg("codex").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut shell_shims = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let path = PathBuf::from(line);
+        if !path.is_file() || is_unspawnable_windowsapps_path(&path) {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if extension.eq_ignore_ascii_case("exe") {
+            return Some(path);
+        }
+        if extension.eq_ignore_ascii_case("cmd")
+            || extension.eq_ignore_ascii_case("bat")
+            || extension.eq_ignore_ascii_case("ps1")
+        {
+            shell_shims.push(path);
+        }
+    }
+    shell_shims.into_iter().next()
+}
+
+#[cfg(windows)]
+fn windows_cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 fn reserve_app_server_port() -> anyhow::Result<u16> {
