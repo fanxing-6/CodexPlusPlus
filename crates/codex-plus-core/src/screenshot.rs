@@ -139,32 +139,21 @@ fn screenshot_filename(display: &DisplayInfo, index: usize, captured_at_ms: u128
 }
 
 fn display_label(display: &DisplayInfo, index: usize) -> String {
-    let name = if display.friendly_name.trim().is_empty() {
-        display.name.trim()
-    } else {
-        display.friendly_name.trim()
-    };
-    if name.is_empty() {
-        format!("display-{}", index + 1)
-    } else {
-        name.to_string()
-    }
+    format!("display-{}-{}", index + 1, display.id)
 }
 
 fn display_info_value(display: &DisplayInfo, index: usize) -> Value {
     json!({
         "index": index,
         "id": display.id,
-        "name": display.name.as_str(),
-        "friendlyName": display.friendly_name.as_str(),
         "x": display.x,
         "y": display.y,
         "width": display.width,
         "height": display.height,
         "scaleFactor": display.scale_factor,
         "rotation": display.rotation,
+        "frequency": display.frequency,
         "isPrimary": display.is_primary,
-        "isBuiltin": display.is_builtin,
     })
 }
 

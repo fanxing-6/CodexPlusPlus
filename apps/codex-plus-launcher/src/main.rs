@@ -581,6 +581,12 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         self.backend_status().await
     }
 
+    async fn capture_screenshot(&self, payload: Value) -> anyhow::Result<Value> {
+        Ok(codex_plus_core::screenshot::capture_screenshot_response(
+            &payload,
+        ))
+    }
+
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
         Ok(codex_plus_core::model_catalog::read_codex_model_catalog().await)
     }
