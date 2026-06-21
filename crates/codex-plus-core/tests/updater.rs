@@ -1,19 +1,31 @@
 use codex_plus_core::update::{
-    Release, download_asset_to, is_newer_version, parse_version_tag, release_from_github_payload,
-    release_from_latest_json_payload, safe_asset_name, select_update_asset,
+    DEFAULT_LATEST_JSON_URL, DEFAULT_REPOSITORY, Release, download_asset_to, is_newer_version,
+    parse_version_tag, release_from_github_payload, release_from_latest_json_payload,
+    safe_asset_name, select_update_asset,
 };
 use serde_json::json;
+
+#[test]
+fn default_update_channel_uses_fork_releases() {
+    assert_eq!(DEFAULT_REPOSITORY, "fanxing-6/CodexPlusPlus");
+    assert_eq!(
+        DEFAULT_LATEST_JSON_URL,
+        "https://github.com/fanxing-6/CodexPlusPlus/releases/latest/download/latest.json"
+    );
+}
 
 #[test]
 fn parse_version_tag_accepts_prefix_and_suffix() {
     assert_eq!(parse_version_tag("v1.2.3").unwrap(), vec![1, 2, 3]);
     assert_eq!(parse_version_tag("1.2.3").unwrap(), vec![1, 2, 3]);
+    assert_eq!(parse_version_tag("v1.2.18.1").unwrap(), vec![1, 2, 18, 1]);
     assert_eq!(parse_version_tag("v1.2.3-beta.1").unwrap(), vec![1, 2, 3]);
 }
 
 #[test]
 fn version_comparison_uses_numeric_segments() {
     assert!(is_newer_version("v1.0.10", "1.0.4").unwrap());
+    assert!(is_newer_version("v1.2.18.1", "1.2.18").unwrap());
     assert!(!is_newer_version("v1.0.4", "1.0.4").unwrap());
     assert!(!is_newer_version("v1.0.3", "1.0.4").unwrap());
 }
@@ -22,7 +34,7 @@ fn version_comparison_uses_numeric_segments() {
 fn github_payload_selects_platform_installer() {
     let release = release_from_github_payload(&json!({
         "tag_name": "v1.0.9",
-        "html_url": "https://github.com/BigPizzaV3/CodexPlusPlus/releases/tag/v1.0.9",
+        "html_url": "https://github.com/fanxing-6/CodexPlusPlus/releases/tag/v1.0.9",
         "body": "fixes",
         "assets": [
             {"name": "source.zip", "browser_download_url": "https://example.test/source.zip"},
@@ -53,7 +65,7 @@ fn github_payload_selects_platform_installer() {
 fn latest_json_payload_selects_platform_installer_without_github_api_shape() {
     let release = release_from_latest_json_payload(&json!({
         "version": "v1.1.6",
-        "url": "https://github.com/BigPizzaV3/CodexPlusPlus/releases/tag/v1.1.6",
+        "url": "https://github.com/fanxing-6/CodexPlusPlus/releases/tag/v1.1.6",
         "body": "静态更新描述",
         "assets": [
             {"name": "source.zip", "url": "https://example.test/source.zip"},

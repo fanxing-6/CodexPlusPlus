@@ -51,7 +51,7 @@ import {
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { Badge as UiBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1018,7 +1018,7 @@ export function App() {
     }
   };
 
-  const launchCommand = async (command: "launch_codex_plus" | "restart_codex_plus") => {
+  const launchCommand = async (command: "launch_codex_plus" | "restart_codex_plus" | "restart_mobile_control_host") => {
     const result = await run(() =>
       call<CommandResult<Record<string, unknown>>>(command, {
         request: {
@@ -1030,6 +1030,15 @@ export function App() {
     );
     return result;
   };
+
+  const restartMobileControlHost = async () => {
+    const result = await launchCommand("restart_mobile_control_host");
+    if (result) await refreshOverview(true);
+    return result;
+  };
+
+  const fetchMobileRelayStatus = async (relayUrl: string) =>
+    run(() => call<MobileRelayStatusResult>("fetch_mobile_relay_status", { request: { relayUrl } }));
 
   const repairBackend = async () => {
     const result = await run(() => call<SettingsResult>("repair_backend"));
@@ -1593,6 +1602,8 @@ export function App() {
       refreshCurrent: () => navigate(route),
       launch,
       restart,
+      restartMobileControlHost,
+      fetchMobileRelayStatus,
       repairBackend,
       repairPluginMarketplace,
       checkPluginMarketplacePrompt,
@@ -1907,6 +1918,8 @@ type Actions = {
   refreshCurrent: () => Promise<void>;
   launch: () => Promise<void>;
   restart: () => Promise<void>;
+  restartMobileControlHost: () => Promise<CommandResult<Record<string, unknown>> | null>;
+  fetchMobileRelayStatus: (relayUrl: string) => Promise<MobileRelayStatusResult | null>;
   repairBackend: () => Promise<void>;
   repairPluginMarketplace: () => Promise<void>;
   checkPluginMarketplacePrompt: () => Promise<PluginMarketplaceStatusResult | null>;
@@ -2002,6 +2015,26 @@ type MobileRelayStatus = {
   roomDetails: MobileRelayRoomStatus[];
 };
 
+type MobileRelayStatusResult = CommandResult<{
+  relayUrl: string;
+  statusUrl: string;
+  fetchedAtMs: number;
+  data: MobileRelayStatus | null;
+}>;
+
+type MobileRelayStatusSnapshot = {
+  data: MobileRelayStatus | null;
+  statusUrl: string;
+  fetchedAtMs: number | null;
+  error: string | null;
+};
+
+type MobileRoomReliability = {
+  status: "ok" | "failed" | "not_checked";
+  title: string;
+  detail: string;
+};
+
 function MobileControlScreen({
   form,
   onFormChange,
@@ -2011,16 +2044,22 @@ function MobileControlScreen({
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
 }) {
-  const [serverStatuses, setServerStatuses] = useState<Record<string, MobileRelayStatus | null>>({});
+  const [serverStatuses, setServerStatuses] = useState<Record<string, MobileRelayStatusSnapshot>>({});
   const [statusMessage, setStatusMessage] = useState("尚未刷新");
   const [loadingStatus, setLoadingStatus] = useState(false);
+  const [mobileActionBusy, setMobileActionBusy] = useState(false);
   const mobileUrl = mobileRelayShareUrl(form);
   const selectedServerId =
     mobileRelayServers.find((server) => server.url === form.mobileControlRelayUrl)?.id || mobileRelayServers[0].id;
   const selectedServer = mobileRelayServers.find((server) => server.id === selectedServerId) ?? mobileRelayServers[0];
-  const selectedStatus = serverStatuses[selectedServer.id] ?? null;
+  const selectedSnapshot = serverStatuses[selectedServer.id] ?? null;
+  const selectedStatus = selectedSnapshot?.data ?? null;
+  const selectedRooms = Array.isArray(selectedStatus?.roomDetails) ? selectedStatus.roomDetails : [];
   const serverCapacity = selectedServer?.capacity ?? 100;
   const serverLoad = selectedStatus?.activeConnections ?? 0;
+  const currentRoom = form.mobileControlRoom.trim();
+  const currentRoomStatus = selectedRooms.find((room) => room.room === currentRoom) ?? null;
+  const currentRoomReliability = mobileRelayRoomReliability(currentRoom, selectedSnapshot, currentRoomStatus);
   const saveMobileSettings = async (next: BackendSettings, silent = true) => {
     onFormChange(next);
     await actions.saveSettingsValue(next, silent);
@@ -2030,51 +2069,132 @@ function MobileControlScreen({
     if (!server) return;
     onFormChange({ ...form, mobileControlRelayUrl: server.url });
   };
-  const startAndCopyMobileLink = async () => {
-    const room = form.mobileControlRoom.trim() || randomToken(8);
-    const key = form.mobileControlKey.trim() || randomToken(32);
-    const relayUrl = selectedServer.url;
-    const next = {
-      ...form,
-      mobileControlEnabled: true,
-      mobileControlRelayUrl: relayUrl,
-      mobileControlRoom: room,
-      mobileControlKey: key,
-    };
-    await saveMobileSettings(next, true);
-    const link = mobileRelayShareUrl(next);
-    if (!link) {
-      await actions.showMessage("手机控制", "服务器地址无效，无法生成手机链接。", "failed");
-      return;
-    }
-    await actions.launch();
-    try {
-      await navigator.clipboard?.writeText(link);
-      await actions.showMessage("手机控制", "已启动并复制手机链接。");
-    } catch (error) {
-      await actions.showMessage("手机控制", `已启动，但复制链接失败：${stringifyError(error)}`, "failed");
-    }
-  };
-  const refreshRelayStatus = async () => {
+  const refreshRelayStatus = useCallback(async () => {
     setLoadingStatus(true);
-    const entries = await Promise.all(mobileRelayServers.map(async (server) => {
-      const httpUrl = mobileRelayHttpUrl(server.url);
-      try {
-        const response = await fetch(`${httpUrl}/status`, { cache: "no-store" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return [server.id, (await response.json()) as MobileRelayStatus, ""] as const;
-      } catch (error) {
-        return [server.id, null, `${server.label}: ${error instanceof Error ? error.message : "刷新失败"}`] as const;
+    try {
+      const entries = await Promise.all(mobileRelayServers.map(async (server) => {
+        const result = await actions.fetchMobileRelayStatus(server.url);
+        const data = isUsableMobileRelayStatus(result?.data) ? result.data : null;
+        const error = result && isSuccessStatus(result.status) && data
+          ? null
+          : result && isSuccessStatus(result.status)
+            ? "relay 状态格式不完整。"
+            : result?.message || "后端命令未返回 relay 状态。";
+        return [server.id, {
+          data,
+          statusUrl: result?.statusUrl ?? "",
+          fetchedAtMs: result?.fetchedAtMs ?? Date.now(),
+          error,
+        }] as const;
+      }));
+      const nextStatuses: Record<string, MobileRelayStatusSnapshot> = {};
+      entries.forEach(([id, snapshot]) => {
+        nextStatuses[id] = snapshot;
+      });
+      setServerStatuses(nextStatuses);
+      const refreshedAt = formatTime(Date.now());
+      const selectedEntry = entries.find(([id]) => id === selectedServerId);
+      const selectedServerLabel = mobileRelayServers.find((item) => item.id === selectedServerId)?.label ?? selectedServerId;
+      if (selectedEntry?.[1].error) {
+        setStatusMessage(`${selectedServerLabel}: ${selectedEntry[1].error} · ${refreshedAt}`);
+      } else if (selectedEntry?.[1].data) {
+        setStatusMessage(`当前服务器已刷新 · ${refreshedAt}`);
+      } else {
+        setStatusMessage(`状态已刷新 · ${refreshedAt}`);
       }
-    }));
-    setServerStatuses(Object.fromEntries(entries.map(([id, data]) => [id, data])));
-    const failed = entries.map(([, , error]) => error).filter(Boolean);
-    setStatusMessage(failed.length ? failed.join("；") : "状态已刷新");
-    setLoadingStatus(false);
+      return nextStatuses;
+    } finally {
+      setLoadingStatus(false);
+    }
+  }, [actions, selectedServerId]);
+
+  const waitForRoomHostOnline = async (serverId: string, room: string) => {
+    if (!room) return null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await delay(attempt === 0 ? 700 : 1200);
+      const snapshots = await refreshRelayStatus();
+      const rooms = snapshots[serverId]?.data?.roomDetails;
+      const roomStatus = Array.isArray(rooms) ? rooms.find((item) => item.room === room) ?? null : null;
+      if (roomStatus?.hostOnline) return roomStatus;
+    }
+    return null;
+  };
+
+  const startAndCopyMobileLink = async (forceRegenerate = false) => {
+    if (mobileActionBusy) return;
+    setMobileActionBusy(true);
+    try {
+      const room = forceRegenerate || !form.mobileControlRoom.trim() ? randomToken(8) : form.mobileControlRoom.trim();
+      const key = forceRegenerate || !form.mobileControlKey.trim() ? randomToken(32) : form.mobileControlKey.trim();
+      const relayUrl = selectedServer.url;
+      const next = {
+        ...form,
+        mobileControlEnabled: true,
+        mobileControlRelayUrl: relayUrl,
+        mobileControlRoom: room,
+        mobileControlKey: key,
+      };
+      await saveMobileSettings(next, true);
+      const link = mobileRelayShareUrl(next);
+      if (!link) {
+        await actions.showMessage("手机控制", "服务器地址无效，无法生成手机链接。", "failed");
+        return;
+      }
+      let copyError = "";
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
+        await navigator.clipboard.writeText(link);
+      } catch (error) {
+        copyError = stringifyError(error);
+      }
+      const launchResult = await actions.restartMobileControlHost();
+      const hostRoom = launchResult && isSuccessStatus(launchResult.status)
+        ? await waitForRoomHostOnline(selectedServer.id, room)
+        : null;
+      if (!launchResult) {
+        await actions.showMessage(
+          "手机控制",
+          copyError
+            ? `手机链接生成完成，但复制失败：${copyError}；host 重启命令未返回结果。`
+            : "已复制手机链接，但 host 重启命令未返回结果。",
+          "failed",
+        );
+        return;
+      }
+      if (!isSuccessStatus(launchResult.status)) {
+        await actions.showMessage(
+          "手机控制",
+          `${copyError ? `手机链接生成完成，但复制失败：${copyError}。` : "已复制手机链接。"}host 重启未确认成功：${launchResult.message}`,
+          "failed",
+        );
+        return;
+      }
+      if (hostRoom?.hostOnline) {
+        await actions.showMessage(
+          "手机控制",
+          copyError ? `电脑端已在当前房间上线，但复制链接失败：${copyError}` : "已复制手机链接，电脑端已在当前房间上线。",
+          copyError ? "failed" : "ok",
+        );
+        return;
+      }
+      await actions.showMessage(
+        "手机控制",
+        copyError
+          ? `手机链接生成完成，但复制失败：${copyError}；relay 暂未看到电脑端进入当前房间，请稍后刷新。`
+          : "已复制手机链接，但 relay 暂未看到电脑端进入当前房间，请稍后刷新。",
+        "not_checked",
+      );
+    } finally {
+      setMobileActionBusy(false);
+    }
   };
   useEffect(() => {
     void refreshRelayStatus();
-  }, []);
+    const intervalId = window.setInterval(() => {
+      void refreshRelayStatus();
+    }, 10000);
+    return () => window.clearInterval(intervalId);
+  }, [refreshRelayStatus]);
   useEffect(() => {
     if (!mobileRelayServers.some((server) => server.url === form.mobileControlRelayUrl)) {
       onFormChange({ ...form, mobileControlRelayUrl: mobileRelayServers[0].url });
@@ -2088,8 +2208,13 @@ function MobileControlScreen({
           <div className="mobile-server-grid">
             {mobileRelayServers.map((server) => {
               const isActive = selectedServerId === server.id;
-              const itemStatus = serverStatuses[server.id] ?? null;
+              const itemSnapshot = serverStatuses[server.id] ?? null;
+              const itemStatus = itemSnapshot?.data ?? null;
               const load = itemStatus?.activeConnections ?? 0;
+              const itemDetail = itemStatus
+                ? `在线 · ${itemStatus.rooms} 个房间 · ${formatBytes(itemStatus.forwardedBytes)}`
+                : itemSnapshot?.error || "尚未刷新";
+              const loadLabel = itemStatus ? `${load}/${server.capacity}` : itemSnapshot?.error ? "不可验证" : `-/${server.capacity}`;
               return (
                 <button
                   className={`mobile-server-card ${isActive ? "active" : ""}`}
@@ -2100,9 +2225,9 @@ function MobileControlScreen({
                   <span>
                     <strong>{server.label}</strong>
                     <small>{server.url}</small>
-                    <small>{itemStatus ? `在线 · ${itemStatus.rooms} 个房间 · ${formatBytes(itemStatus.forwardedBytes)}` : "未连接或未刷新"}</small>
+                    <small>{itemDetail}</small>
                   </span>
-                  <em>{load}/{server.capacity}</em>
+                  <em>{loadLabel}</em>
                 </button>
               );
             })}
@@ -2116,29 +2241,25 @@ function MobileControlScreen({
               <span>容量</span>
               <Input
                 readOnly
-                value={`${serverLoad}/${serverCapacity}`}
+                value={selectedStatus ? `${serverLoad}/${serverCapacity}` : selectedSnapshot?.error ? "不可验证" : "尚未刷新"}
               />
             </Label>
           </div>
           <Toolbar>
-            <Button onClick={() => void startAndCopyMobileLink()} type="button">
+            <Button disabled={mobileActionBusy} onClick={() => void startAndCopyMobileLink()} type="button">
               <Rocket className="h-4 w-4" />
-              启动并复制手机链接
+              {mobileActionBusy ? "正在启动" : "启动并复制手机链接"}
             </Button>
             <Button
-              onClick={() => void saveMobileSettings({
-                ...form,
-                mobileControlEnabled: true,
-                mobileControlRoom: randomToken(8),
-                mobileControlKey: randomToken(32),
-              }, false)}
+              disabled={mobileActionBusy}
+              onClick={() => void startAndCopyMobileLink(true)}
               type="button"
               variant="secondary"
             >
               <KeyRound className="h-4 w-4" />
               重新生成 Token
             </Button>
-            <Button onClick={() => void refreshRelayStatus()} type="button" variant="secondary">
+            <Button disabled={loadingStatus || mobileActionBusy} onClick={() => void refreshRelayStatus()} type="button" variant="secondary">
               <RefreshCw className="h-4 w-4" />
               {loadingStatus ? "正在刷新" : "刷新服务器状态"}
             </Button>
@@ -2152,13 +2273,24 @@ function MobileControlScreen({
             <div className="relay-file-head">
               <div>
                 <strong>{mobileUrl || "未生成手机入口"}</strong>
-                <span>{mobileUrl ? "手机打开后会自动填入房间和 Key 并尝试连接。" : "选择服务器并启动后会生成手机入口。"}</span>
+                <span>
+                  {mobileUrl
+                    ? `${currentRoomReliability.title}：${currentRoomReliability.detail}`
+                    : "选择服务器并启动后会生成手机入口。"}
+                </span>
               </div>
               {mobileUrl ? (
                 <Button
                   onClick={() => {
-                    void navigator.clipboard?.writeText(mobileUrl);
-                    void actions.showMessage("手机入口", "已复制手机入口地址。");
+                    void (async () => {
+                      try {
+                        if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
+                        await navigator.clipboard.writeText(mobileUrl);
+                        await actions.showMessage("手机入口", "已复制手机入口地址。", "ok");
+                      } catch (error) {
+                        await actions.showMessage("手机入口", `复制失败：${stringifyError(error)}`, "failed");
+                      }
+                    })();
                   }}
                   size="sm"
                   type="button"
@@ -2175,14 +2307,25 @@ function MobileControlScreen({
       <Panel>
         <CardHead title="服务器状态" detail={statusMessage} />
         <CardContent>
-          {selectedStatus ? (
-            <>
-              <div className="health-grid">
+          <div className="health-grid">
+            <div className={`health-item ${currentRoomReliability.status === "ok" ? "ok" : "needs-fix"}`}>
+              {currentRoomReliability.status === "ok" ? <ShieldCheck className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
+              <div>
+                <strong>当前房间</strong>
+                <span>{currentRoomReliability.detail}</span>
+              </div>
+              <Badge status={currentRoomReliability.status} />
+            </div>
+            {selectedStatus ? (
+              <>
                 <div className="health-item ok">
                   <CheckCircle2 className="h-4 w-4" />
                   <div>
                     <strong>在线连接</strong>
-                    <span>{selectedStatus.activeConnections} 个在线连接，累计 {selectedStatus.totalConnections} 次连接。</span>
+                    <span>
+                      {selectedStatus.activeConnections} 个在线连接，累计 {selectedStatus.totalConnections} 次连接
+                      {selectedSnapshot?.fetchedAtMs ? `，${formatTime(selectedSnapshot.fetchedAtMs)} 刷新` : ""}。
+                    </span>
                   </div>
                   <Badge status="ok" />
                 </div>
@@ -2194,26 +2337,39 @@ function MobileControlScreen({
                   </div>
                   <Badge status="ok" />
                 </div>
-              </div>
-              <div className="relay-file-grid">
-                {selectedStatus.roomDetails.map((room) => (
+              </>
+            ) : null}
+          </div>
+          {selectedStatus ? (
+            <div className="relay-file-grid">
+              {selectedRooms
+                .slice()
+                .sort((left, right) => {
+                  if (left.room === currentRoom) return -1;
+                  if (right.room === currentRoom) return 1;
+                  return 0;
+                })
+                .map((room) => (
                   <div className="relay-file-panel" key={room.room}>
                     <div className="relay-file-head">
                       <div>
-                        <strong>{room.room}</strong>
+                        <strong>{room.room === currentRoom ? `${room.room} · 当前` : room.room}</strong>
                         <span>
                           host {room.hostOnline ? "在线" : "离线"} / client {room.clientOnline ? "在线" : "离线"}，
                           {room.connections} 个连接，{formatBytes(room.forwardedBytes)}
                         </span>
                       </div>
-                      <Badge status={room.hostOnline && room.clientOnline ? "ok" : "not_checked"} />
+                      <Badge status={room.hostOnline ? (room.clientOnline ? "ok" : "not_checked") : "failed"} />
                     </div>
                   </div>
                 ))}
-              </div>
-            </>
+            </div>
           ) : (
-            <p className="field-hint">点击“刷新服务器状态”查看 relay 负载、在线用户和房间连接情况。</p>
+            <p className="field-hint">
+              {selectedSnapshot?.error
+                ? `当前服务器状态不可验证：${selectedSnapshot.error}`
+                : "点击“刷新服务器状态”查看 relay 负载、在线用户和房间连接情况。"}
+            </p>
           )}
         </CardContent>
       </Panel>
@@ -3146,17 +3302,17 @@ function AboutScreen({
           <div className="metric-list">
             <Metric label="Codex++ 版本" value={overview?.current_version ?? update?.currentVersion ?? "-"} />
             <Metric label="Codex 版本" value={overview?.codex_version ?? "未检测到"} />
-            <Metric label="项目地址" value="github.com/BigPizzaV3/CodexPlusPlus" />
-          </div>
-          <Toolbar>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexPlusPlus")} variant="secondary">
-              <ExternalLink className="h-4 w-4" />
-              打开项目主页
-            </Button>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexPlusPlus/issues")} variant="secondary">
-              <ExternalLink className="h-4 w-4" />
-              反馈问题
-            </Button>
+              <Metric label="项目地址" value="github.com/fanxing-6/CodexPlusPlus" />
+            </div>
+            <Toolbar>
+              <Button onClick={() => void actions.openExternalUrl("https://github.com/fanxing-6/CodexPlusPlus")} variant="secondary">
+                <ExternalLink className="h-4 w-4" />
+                打开项目主页
+              </Button>
+              <Button onClick={() => void actions.openExternalUrl("https://github.com/fanxing-6/CodexPlusPlus/issues")} variant="secondary">
+                <ExternalLink className="h-4 w-4" />
+                反馈问题
+              </Button>
             <Button onClick={() => void actions.openExternalUrl("https://discord.gg/y96kX7A76v")} variant="secondary">
               <MessageCircle className="h-4 w-4" />
               Discord
@@ -4505,6 +4661,96 @@ function mobileRelayShareUrl(settings: Pick<BackendSettings, "mobileControlRelay
   url.searchParams.set("key", key);
   url.searchParams.set("auto", "1");
   return url.toString();
+}
+
+function isUsableMobileRelayStatus(value: MobileRelayStatus | null | undefined): value is MobileRelayStatus {
+  return Boolean(
+    value &&
+      typeof value.status === "string" &&
+      typeof value.service === "string" &&
+      typeof value.rooms === "number" &&
+      typeof value.activeConnections === "number" &&
+      typeof value.totalConnections === "number" &&
+      typeof value.forwardedMessages === "number" &&
+      typeof value.forwardedBytes === "number" &&
+      Array.isArray(value.roomDetails) &&
+      value.roomDetails.every((room) =>
+        room &&
+        typeof room.room === "string" &&
+        typeof room.hostOnline === "boolean" &&
+        typeof room.clientOnline === "boolean" &&
+        typeof room.connections === "number" &&
+        typeof room.ageSeconds === "number" &&
+        typeof room.forwardedMessages === "number" &&
+        typeof room.forwardedBytes === "number",
+      ),
+  );
+}
+
+function mobileRelayRoomReliability(
+  room: string,
+  snapshot: MobileRelayStatusSnapshot | null,
+  roomStatus: MobileRelayRoomStatus | null,
+): MobileRoomReliability {
+  if (!room) {
+    return {
+      status: "not_checked",
+      title: "尚未生成",
+      detail: "还没有生成当前房间，先启动并复制手机链接。",
+    };
+  }
+  if (!snapshot) {
+    return {
+      status: "not_checked",
+      title: "尚未刷新",
+      detail: "尚未刷新 relay 状态，暂时无法确认当前房间是否可用。",
+    };
+  }
+  const fetchedAt = snapshot.fetchedAtMs ? `（${formatTime(snapshot.fetchedAtMs)} 刷新）` : "";
+  if (snapshot.error) {
+    return {
+      status: "failed",
+      title: "状态不可验证",
+      detail: `${snapshot.error}${fetchedAt}`,
+    };
+  }
+  if (!snapshot.data) {
+    return {
+      status: "not_checked",
+      title: "无状态数据",
+      detail: `relay 探测完成，但没有返回可用状态数据${fetchedAt}。`,
+    };
+  }
+  if (!roomStatus) {
+    return {
+      status: "failed",
+      title: "电脑端未上线",
+      detail: `relay 没有看到当前房间，通常表示电脑端 host 还没有按这组房间和 Key 重连${fetchedAt}。`,
+    };
+  }
+  if (!roomStatus.hostOnline) {
+    return {
+      status: "failed",
+      title: "电脑端离线",
+      detail: `relay 看到了当前房间，但电脑端 host 离线；手机端 ${roomStatus.clientOnline ? "在线" : "离线"}${fetchedAt}。`,
+    };
+  }
+  if (roomStatus.clientOnline) {
+    return {
+      status: "ok",
+      title: "已连接",
+      detail: `电脑端和手机端都已在线，远程控制链路已建立${fetchedAt}。`,
+    };
+  }
+  return {
+    status: "ok",
+    title: "电脑端已就绪",
+    detail: `电脑端已在当前房间上线，正在等待手机连接${fetchedAt}。`,
+  };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function formatBytes(bytes: number) {

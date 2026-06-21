@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codex_plus_core::install::SILENT_BINARY;
 use codex_plus_core::models::{DeleteResult, SessionRef};
@@ -263,6 +263,21 @@ pub struct LaunchRequest {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MobileRelayStatusRequest {
+    pub relay_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRelayStatusPayload {
+    pub relay_url: String,
+    pub status_url: String,
+    pub fetched_at_ms: u64,
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogRequest {
     #[serde(default = "default_log_lines")]
     pub lines: usize,
@@ -339,6 +354,13 @@ where
     args.into_iter().any(|arg| arg.as_ref() == "--show-update") || env_value == Some("1")
 }
 
+fn command_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[tauri::command]
 pub async fn load_overview() -> CommandResult<OverviewPayload> {
     let payload = tauri::async_runtime::spawn_blocking(load_overview_payload).await;
@@ -396,6 +418,12 @@ pub fn restart_codex_plus(request: LaunchRequest) -> CommandResult<Value> {
     spawn_codex_plus_launch(request, "Codex 已请求重启，启动任务正在后台运行。")
 }
 
+#[tauri::command]
+pub fn restart_mobile_control_host(request: LaunchRequest) -> CommandResult<Value> {
+    codex_plus_core::watcher::stop_launcher_processes_and_wait();
+    spawn_codex_plus_launch(request, "手机控制 host 已重启，正在重新连接 relay。")
+}
+
 fn spawn_codex_plus_launch(request: LaunchRequest, accepted_message: &str) -> CommandResult<Value> {
     let debug_port = request.debug_port;
     let helper_port = request.helper_port;
@@ -446,6 +474,92 @@ fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<()> {
         .spawn()
         .map(|_| ())
         .map_err(|error| anyhow::anyhow!("无法启动 {}：{error}", launcher.to_string_lossy()))
+}
+
+#[tauri::command]
+pub async fn fetch_mobile_relay_status(
+    request: MobileRelayStatusRequest,
+) -> CommandResult<MobileRelayStatusPayload> {
+    let relay_url = request.relay_url.trim().to_string();
+    let status_url = match mobile_relay_status_url(&relay_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return failed(
+                &format!("relay 地址无效：{error}"),
+                MobileRelayStatusPayload {
+                    relay_url,
+                    status_url: String::new(),
+                    fetched_at_ms: command_now_ms(),
+                    data: None,
+                },
+            );
+        }
+    };
+    let fetched_at_ms = command_now_ms();
+    let result = async {
+        let client = codex_plus_core::http_client::proxied_client(&format!(
+            "Codex++/{}",
+            codex_plus_core::version::VERSION
+        ))?;
+        let response = client
+            .get(&status_url)
+            .header("accept", "application/json")
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await?;
+        let response = response.error_for_status()?;
+        anyhow::Ok(response.json::<Value>().await?)
+    }
+    .await;
+    match result {
+        Ok(data) => ok(
+            "relay 状态已刷新。",
+            MobileRelayStatusPayload {
+                relay_url,
+                status_url,
+                fetched_at_ms,
+                data: Some(data),
+            },
+        ),
+        Err(error) => failed(
+            &format!("relay 状态刷新失败：{error}"),
+            MobileRelayStatusPayload {
+                relay_url,
+                status_url,
+                fetched_at_ms,
+                data: None,
+            },
+        ),
+    }
+}
+
+fn mobile_relay_status_url(value: &str) -> anyhow::Result<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        anyhow::bail!("地址为空");
+    }
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("ws://{trimmed}")
+    };
+    let (scheme, rest) = with_scheme
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("缺少协议"))?;
+    let http_scheme = match scheme.to_ascii_lowercase().as_str() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => anyhow::bail!("不支持的协议：{scheme}"),
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if authority.is_empty() {
+        anyhow::bail!("缺少主机");
+    }
+    Ok(format!("{http_scheme}://{authority}/status"))
 }
 
 #[tauri::command]

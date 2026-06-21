@@ -48,6 +48,8 @@ pub fn run() {
             commands::load_overview,
             commands::launch_codex_plus,
             commands::restart_codex_plus,
+            commands::restart_mobile_control_host,
+            commands::fetch_mobile_relay_status,
             commands::load_settings,
             commands::save_settings,
             commands::load_ccs_providers,

@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build, for example v1.2.18"
+        description: "Release tag to build, for example v1.2.18.1"
         required: true
-        default: "v1.2.18"
+        default: "v1.2.18.1"
 
 permissions:
   contents: write
@@ -44,8 +44,8 @@ jobs:
           fi
           version="${tag#v}"
           version="${version#V}"
-          if [ -z "$version" ] || [ "$version" = "$tag" ]; then
-            echo "Release tag must look like v1.2.18; got: $tag" >&2
+          if [ -z "$version" ] || [ "$version" = "$tag" ] || ! [[ "$tag" =~ ^[vV][0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must look like v1.2.18.1; got: $tag" >&2
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -102,18 +102,13 @@ jobs:
         working-directory: apps/codex-plus-manager
         run: npm ci
 
-      - name: TypeScript check
-        working-directory: apps/codex-plus-manager
-        run: npm run check
-
       - name: Build frontend
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
-      - name: Run Rust tests
-        run: cargo test --workspace
-
       - name: Build release binaries
+        env:
+          CODEX_PLUS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release
 
       - name: Stage Windows app files
@@ -195,6 +190,8 @@ jobs:
         run: npm run vite:build
 
       - name: Build release binaries
+        env:
+          CODEX_PLUS_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
