@@ -2,13 +2,17 @@
 
 #include "core/capturerequest.h"
 #include "core/flameshot.h"
+#include "widgets/capture/capturewidget.h"
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QEvent>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QNetworkProxyFactory>
 #include <QString>
+#include <QTimer>
+#include <QWidget>
 
 #include <cstdlib>
 #include <cstring>
@@ -63,18 +67,52 @@ bool ensure_qapplication(CodexFlameshotCaptureResult* result)
     return owned_app != nullptr;
 }
 
+void flush_qt_deferred_deletes()
+{
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+}
+
+void cleanup_stale_capture_widgets()
+{
+    // The normal Flameshot CLI exits after one capture. Embedded mode keeps the
+    // process alive, so flush widgets queued by Qt::WA_DeleteOnClose before the
+    // next request observes Flameshot's internal QPointer.
+    flush_qt_deferred_deletes();
+
+    const auto widgets = QApplication::topLevelWidgets();
+    for (QWidget* widget : widgets) {
+        if (qobject_cast<CaptureWidget*>(widget) != nullptr) {
+            widget->close();
+            widget->deleteLater();
+        }
+    }
+
+    flush_qt_deferred_deletes();
+}
+
+void quit_loop_after_qt_settles(QEventLoop* loop)
+{
+    QTimer::singleShot(0, loop, [loop]() {
+        flush_qt_deferred_deletes();
+        loop->quit();
+    });
+}
+
 int request_capture_and_wait(const CaptureRequest& request)
 {
     auto* flameshot = Flameshot::instance();
     QEventLoop loop;
     int exit_code = CODEX_FLAMESHOT_UNAVAILABLE;
 
+    cleanup_stale_capture_widgets();
+
     QObject::connect(flameshot,
                      &Flameshot::captureTaken,
                      &loop,
                      [&]() {
                          exit_code = CODEX_FLAMESHOT_OK;
-                         loop.quit();
+                         quit_loop_after_qt_settles(&loop);
                      },
                      Qt::SingleShotConnection);
     QObject::connect(flameshot,
@@ -82,12 +120,13 @@ int request_capture_and_wait(const CaptureRequest& request)
                      &loop,
                      [&]() {
                          exit_code = CODEX_FLAMESHOT_CANCELLED;
-                         loop.quit();
+                         quit_loop_after_qt_settles(&loop);
                      },
                      Qt::SingleShotConnection);
 
     flameshot->requestCapture(request);
     loop.exec();
+    cleanup_stale_capture_widgets();
     return exit_code;
 }
 
