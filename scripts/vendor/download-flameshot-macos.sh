@@ -47,11 +47,10 @@ fi
 
 rm -rf "$DESTINATION_ABS"
 mkdir -p "$DESTINATION_ABS"
-cp -R "$APP_SOURCE" "$DESTINATION_ABS/flameshot.app"
-chmod -R u+w "$DESTINATION_ABS/flameshot.app"
-xattr -cr "$DESTINATION_ABS/flameshot.app" >/dev/null 2>&1 || true
+ditto "$APP_SOURCE" "$DESTINATION_ABS/Flameshot.app"
+xattr -cr "$DESTINATION_ABS/Flameshot.app" >/dev/null 2>&1 || true
 
-if [[ ! -x "$DESTINATION_ABS/flameshot.app/Contents/MacOS/flameshot" ]]; then
+if [[ ! -x "$DESTINATION_ABS/Flameshot.app/Contents/MacOS/flameshot" ]]; then
   echo "Failed to stage bundled Flameshot executable" >&2
   exit 1
 fi

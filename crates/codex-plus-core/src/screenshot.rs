@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 
 pub fn capture_screenshot_response(payload: &Value) -> Value {
     match capture_screenshot(payload) {
@@ -88,12 +90,12 @@ fn capture_region_with_flameshot(captured_at_ms: u128) -> CaptureResult<Vec<u8>>
     ));
     let _ = fs::remove_file(&output_path);
 
-    let command_path = bundled_flameshot_command().ok_or_else(|| {
+    let launcher = bundled_flameshot_launcher().ok_or_else(|| {
         ScreenshotCaptureError::Failed(anyhow!(
             "安装包缺少内置 Flameshot，请重新安装 Codex++ 或重新构建安装包"
         ))
     })?;
-    match run_flameshot_gui(&command_path, &output_path) {
+    match run_flameshot_gui(&launcher, &output_path) {
         Ok(bytes) => Ok(bytes),
         Err(FlameshotRunError::Cancelled(message)) => {
             let _ = fs::remove_file(&output_path);
@@ -105,6 +107,13 @@ fn capture_region_with_flameshot(captured_at_ms: u128) -> CaptureResult<Vec<u8>>
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlameshotLauncher {
+    Executable(PathBuf),
+    #[cfg(target_os = "macos")]
+    MacApp(PathBuf),
+}
+
 #[derive(Debug)]
 enum FlameshotRunError {
     Cancelled(String),
@@ -112,6 +121,19 @@ enum FlameshotRunError {
 }
 
 fn run_flameshot_gui(
+    launcher: &FlameshotLauncher,
+    output_path: &Path,
+) -> Result<Vec<u8>, FlameshotRunError> {
+    match launcher {
+        FlameshotLauncher::Executable(command_path) => {
+            run_flameshot_executable(command_path, output_path)
+        }
+        #[cfg(target_os = "macos")]
+        FlameshotLauncher::MacApp(app_bundle) => run_flameshot_macos_app(app_bundle, output_path),
+    }
+}
+
+fn run_flameshot_executable(
     command_path: &Path,
     output_path: &Path,
 ) -> Result<Vec<u8>, FlameshotRunError> {
@@ -143,23 +165,111 @@ fn run_flameshot_gui(
         ));
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Err(FlameshotRunError::Unavailable(format!(
+        "{} 返回 {}{}",
+        command_path.display(),
+        output.status,
+        command_output_details(&output.stdout, &output.stderr)
+    )))
+}
+
+#[cfg(target_os = "macos")]
+fn run_flameshot_macos_app(
+    app_bundle: &Path,
+    output_path: &Path,
+) -> Result<Vec<u8>, FlameshotRunError> {
+    let _ = fs::remove_file(output_path);
+    let mut child = Command::new("/usr/bin/open")
+        .arg("-W")
+        .arg("-n")
+        .arg(app_bundle)
+        .arg("--args")
+        .arg("gui")
+        .arg("--path")
+        .arg(output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            FlameshotRunError::Unavailable(format!(
+                "{}: {}。{}",
+                app_bundle.display(),
+                error,
+                macos_screen_recording_hint()
+            ))
+        })?;
+
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        if output_path.exists() {
+            if let Some(bytes) = read_nonempty_file_after_flush(output_path) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(output_path);
+                return Ok(bytes);
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if output_path.exists() {
+                    if let Some(bytes) = read_nonempty_file_after_flush(output_path) {
+                        let _ = fs::remove_file(output_path);
+                        return Ok(bytes);
+                    }
+                }
+                if status.success() {
+                    return Err(FlameshotRunError::Cancelled(
+                        "已取消区域截图或未保存截图".to_string(),
+                    ));
+                }
+                return Err(FlameshotRunError::Unavailable(format!(
+                    "{} 返回 {}。{}",
+                    app_bundle.display(),
+                    status,
+                    macos_screen_recording_hint()
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                return Err(FlameshotRunError::Unavailable(format!(
+                    "{} 等待退出失败：{}。{}",
+                    app_bundle.display(),
+                    error,
+                    macos_screen_recording_hint()
+                )));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(FlameshotRunError::Unavailable(format!(
+                "等待内置 Flameshot 保存截图超时。{}",
+                macos_screen_recording_hint()
+            )));
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+}
+
+fn command_output_details(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
     let details = [stderr, stdout]
         .into_iter()
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
         .join("；");
-    Err(FlameshotRunError::Unavailable(format!(
-        "{} 返回 {}{}",
-        command_path.display(),
-        output.status,
-        if details.is_empty() {
-            String::new()
-        } else {
-            format!("：{details}")
-        }
-    )))
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!("：{details}")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_screen_recording_hint() -> &'static str {
+    "请在 macOS 系统设置 > 隐私与安全性 > 屏幕与系统音频录制 中允许 Flameshot，授权后退出并重新打开 Codex++"
 }
 
 fn read_nonempty_file_after_flush(path: &Path) -> Option<Vec<u8>> {
@@ -190,68 +300,71 @@ fn png_dimensions(bytes: &[u8]) -> anyhow::Result<(u32, u32)> {
     Ok((width, height))
 }
 
-fn bundled_flameshot_command() -> Option<PathBuf> {
+fn bundled_flameshot_launcher() -> Option<FlameshotLauncher> {
     let exe = env::current_exe().ok()?;
     bundled_flameshot_candidates_for_exe(&exe)
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|launcher| launcher.exists())
 }
 
-fn bundled_flameshot_candidates_for_exe(exe: &Path) -> Vec<PathBuf> {
+fn bundled_flameshot_candidates_for_exe(exe: &Path) -> Vec<FlameshotLauncher> {
     let mut candidates = Vec::new();
     if let Some(dir) = exe.parent() {
         #[cfg(windows)]
         {
-            candidates.push(
+            candidates.push(FlameshotLauncher::Executable(
                 dir.join("tools")
                     .join("flameshot")
                     .join("flameshot-cli.exe"),
-            );
-            candidates.push(dir.join("tools").join("flameshot").join("flameshot.exe"));
-            candidates.push(
+            ));
+            candidates.push(FlameshotLauncher::Executable(
+                dir.join("tools").join("flameshot").join("flameshot.exe"),
+            ));
+            candidates.push(FlameshotLauncher::Executable(
                 dir.join("tools")
                     .join("flameshot")
                     .join("bin")
                     .join("flameshot-cli.exe"),
-            );
-            candidates.push(
+            ));
+            candidates.push(FlameshotLauncher::Executable(
                 dir.join("tools")
                     .join("flameshot")
                     .join("bin")
                     .join("flameshot.exe"),
-            );
+            ));
         }
 
         #[cfg(target_os = "macos")]
         {
             if let Some(contents_dir) = dir.parent() {
-                candidates.push(
-                    contents_dir
-                        .join("Resources")
-                        .join("tools")
-                        .join("flameshot")
-                        .join("flameshot.app")
-                        .join("Contents")
-                        .join("MacOS")
-                        .join("flameshot"),
-                );
+                candidates.push(FlameshotLauncher::MacApp(
+                    contents_dir.join("Helpers").join("Flameshot.app"),
+                ));
             }
-            candidates.push(
-                dir.join("tools")
-                    .join("flameshot")
-                    .join("flameshot.app")
-                    .join("Contents")
-                    .join("MacOS")
-                    .join("flameshot"),
-            );
         }
 
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            candidates.push(dir.join("tools").join("flameshot").join("flameshot"));
+            candidates.push(FlameshotLauncher::Executable(
+                dir.join("tools").join("flameshot").join("flameshot"),
+            ));
         }
     }
     candidates
+}
+
+impl FlameshotLauncher {
+    fn exists(&self) -> bool {
+        match self {
+            FlameshotLauncher::Executable(path) => path.is_file(),
+            #[cfg(target_os = "macos")]
+            FlameshotLauncher::MacApp(path) => path
+                .join("Contents")
+                .join("MacOS")
+                .join("flameshot")
+                .is_file(),
+        }
+    }
 }
 
 struct CodexWindowHideGuard {
@@ -320,9 +433,26 @@ mod tests {
         assert!(png_dimensions(b"not-a-png").is_err());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn bundled_flameshot_candidates_are_app_relative() {
+    fn bundled_flameshot_candidates_are_exe_relative() {
         let candidates = bundled_flameshot_candidates_for_exe(Path::new("/tmp/codex-plus-plus"));
-        assert!(candidates.iter().all(|path| path.starts_with("/tmp/tools")));
+        assert!(candidates.iter().all(|launcher| match launcher {
+            FlameshotLauncher::Executable(path) => path.starts_with("/tmp/tools"),
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_flameshot_candidates_are_helper_app_relative() {
+        let candidates = bundled_flameshot_candidates_for_exe(Path::new(
+            "/tmp/Codex++.app/Contents/MacOS/CodexPlusPlus",
+        ));
+        assert!(candidates.iter().all(|launcher| match launcher {
+            FlameshotLauncher::Executable(path) =>
+                path.starts_with("/tmp/Codex++.app/Contents/MacOS/tools"),
+            FlameshotLauncher::MacApp(path) =>
+                path.starts_with("/tmp/Codex++.app/Contents/Helpers"),
+        }));
     }
 }

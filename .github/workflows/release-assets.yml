@@ -218,10 +218,10 @@ jobs:
             test -f "$app/Contents/PkgInfo"
             test -x "$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
             plutil -lint "$app/Contents/Info.plist" >/dev/null
-            codesign -dv "$app" >/dev/null 2>&1
+            codesign --verify --deep --strict "$app" >/dev/null
             echo "verified: $app"
           done
-          test -x "dist/macos/stage/Codex++.app/Contents/Resources/tools/flameshot/flameshot.app/Contents/MacOS/flameshot"
+          test -x "dist/macos/stage/Codex++.app/Contents/Helpers/Flameshot.app/Contents/MacOS/flameshot"
 
       - name: Generate macOS checksum
         run: |

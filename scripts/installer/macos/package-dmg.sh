@@ -37,18 +37,17 @@ prepare_icon() {
 copy_bundled_flameshot() {
   local app_dir="$1"
   local source="${FLAMESHOT_BUNDLE_DIR:-$ROOT/dist/vendor/flameshot/$ARCH}"
-  local destination="$app_dir/Contents/Resources/tools/flameshot"
+  local destination="$app_dir/Contents/Helpers"
 
-  if [ ! -d "$source/flameshot.app" ]; then
-    echo "error: bundled Flameshot app not found: $source/flameshot.app" >&2
+  if [ ! -d "$source/Flameshot.app" ]; then
+    echo "error: bundled Flameshot app not found: $source/Flameshot.app" >&2
     return 1
   fi
-  rm -rf "$destination"
+  rm -rf "$destination/Flameshot.app"
   mkdir -p "$destination"
-  cp -R "$source/flameshot.app" "$destination/flameshot.app"
-  chmod -R u+w "$destination/flameshot.app"
-  xattr -cr "$destination/flameshot.app" >/dev/null 2>&1 || true
-  if [ ! -x "$destination/flameshot.app/Contents/MacOS/flameshot" ]; then
+  ditto "$source/Flameshot.app" "$destination/Flameshot.app"
+  xattr -cr "$destination/Flameshot.app" >/dev/null 2>&1 || true
+  if [ ! -x "$destination/Flameshot.app/Contents/MacOS/flameshot" ]; then
     echo "error: bundled Flameshot executable missing in $destination" >&2
     return 1
   fi
@@ -117,11 +116,11 @@ sign_app() {
   local app_dir="$1"
   local executable
   executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist")"
-  if [ -d "$app_dir/Contents/Resources/tools/flameshot/flameshot.app" ]; then
-    codesign --force --deep --sign - "$app_dir/Contents/Resources/tools/flameshot/flameshot.app"
+  if [ -d "$app_dir/Contents/Helpers/Flameshot.app" ]; then
+    codesign --verify --deep --strict "$app_dir/Contents/Helpers/Flameshot.app"
   fi
   codesign --force --sign - "$app_dir/Contents/MacOS/$executable"
-  codesign --force --deep --sign - "$app_dir"
+  codesign --force --sign - "$app_dir"
 }
 
 verify_app() {
@@ -138,10 +137,13 @@ verify_app() {
     echo "error: missing PkgInfo in $app_dir" >&2
     return 1
   fi
-  codesign -dv "$app_dir" >/dev/null 2>&1 || {
+  codesign --verify --deep --strict "$app_dir" >/dev/null 2>&1 || {
     echo "error: codesign verification failed for $app_dir" >&2
     return 1
   }
+  if [ -d "$app_dir/Contents/Helpers/Flameshot.app" ]; then
+    codesign --verify --deep --strict "$app_dir/Contents/Helpers/Flameshot.app" >/dev/null
+  fi
 }
 
 prepare_icon
