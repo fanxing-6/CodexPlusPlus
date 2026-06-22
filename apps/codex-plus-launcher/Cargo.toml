@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+embedded-flameshot = ["codex-plus-core/embedded-flameshot"]
+
 [[bin]]
 name = "codex-plus-plus"
 path = "src/main.rs"

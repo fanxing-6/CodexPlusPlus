@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::env;
+#[cfg(feature = "embedded-flameshot")]
+use std::ffi::{CStr, CString};
 use std::fs;
+#[cfg(feature = "embedded-flameshot")]
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,9 +13,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use serde_json::{Value, json};
+use base64::Engine;
+use serde_json::{json, Value};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -161,6 +165,24 @@ struct FlameshotOptions {
     accept_on_select: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionScreenshotBackend {
+    #[cfg(feature = "embedded-flameshot")]
+    EmbeddedFlameshot,
+    #[cfg_attr(feature = "embedded-flameshot", allow(dead_code))]
+    BundledFlameshotProcess,
+}
+
+impl RegionScreenshotBackend {
+    fn provider_name(self) -> &'static str {
+        match self {
+            #[cfg(feature = "embedded-flameshot")]
+            Self::EmbeddedFlameshot => "flameshot-embedded",
+            Self::BundledFlameshotProcess => "flameshot",
+        }
+    }
+}
+
 impl From<anyhow::Error> for ScreenshotCaptureError {
     fn from(error: anyhow::Error) -> Self {
         Self::Failed(error)
@@ -170,6 +192,7 @@ impl From<anyhow::Error> for ScreenshotCaptureError {
 fn capture_region_screenshot(payload: &Value) -> CaptureResult<Value> {
     let captured_at_ms = now_ms();
     let flameshot_options = flameshot_options_from_payload(payload);
+    let backend = region_screenshot_backend();
     let hide_guard = CodexWindowHideGuard::maybe_hide(
         payload
             .get("hideCodexWindow")
@@ -187,7 +210,7 @@ fn capture_region_screenshot(payload: &Value) -> CaptureResult<Value> {
         "message": "已截取区域截图",
         "capturedAtMs": captured_at_ms,
         "displayCount": 1,
-        "provider": "flameshot",
+        "provider": backend.provider_name(),
         "files": [{
             "filename": format!("codex-screenshot-{captured_at_ms}-region.png"),
             "contentType": "image/png",
@@ -214,12 +237,16 @@ fn capture_region_with_flameshot(
     ));
     let _ = fs::remove_file(&output_path);
 
-    let launcher = bundled_flameshot_launcher().ok_or_else(|| {
-        ScreenshotCaptureError::Failed(anyhow!(
-            "安装包缺少内置 Flameshot，请重新安装 Codex++ 或重新构建安装包"
-        ))
-    })?;
-    match run_flameshot_gui(&launcher, &output_path, options) {
+    let result = match region_screenshot_backend() {
+        #[cfg(feature = "embedded-flameshot")]
+        RegionScreenshotBackend::EmbeddedFlameshot => {
+            run_embedded_flameshot_gui(&output_path, options)
+        }
+        RegionScreenshotBackend::BundledFlameshotProcess => {
+            run_bundled_flameshot_gui(&output_path, options)
+        }
+    };
+    match result {
         Ok(bytes) => Ok(bytes),
         Err(FlameshotRunError::Cancelled(message)) => {
             let _ = fs::remove_file(&output_path);
@@ -229,6 +256,110 @@ fn capture_region_with_flameshot(
             anyhow!("内置 Flameshot 启动失败：{message}"),
         )),
     }
+}
+
+fn region_screenshot_backend() -> RegionScreenshotBackend {
+    #[cfg(feature = "embedded-flameshot")]
+    {
+        return RegionScreenshotBackend::EmbeddedFlameshot;
+    }
+    #[cfg(not(feature = "embedded-flameshot"))]
+    {
+        RegionScreenshotBackend::BundledFlameshotProcess
+    }
+}
+
+fn run_bundled_flameshot_gui(
+    output_path: &Path,
+    options: FlameshotOptions,
+) -> Result<Vec<u8>, FlameshotRunError> {
+    let launcher = bundled_flameshot_launcher().ok_or_else(|| {
+        FlameshotRunError::Unavailable(
+            "安装包缺少内置 Flameshot，请重新安装 Codex++ 或重新构建安装包".to_string(),
+        )
+    })?;
+    run_flameshot_gui(&launcher, output_path, options)
+}
+
+#[cfg(feature = "embedded-flameshot")]
+#[repr(C)]
+struct CodexFlameshotCaptureRequest {
+    output_path: *const c_char,
+    delay_ms: u32,
+    accept_on_select: u8,
+}
+
+#[cfg(feature = "embedded-flameshot")]
+#[repr(C)]
+struct CodexFlameshotCaptureResult {
+    message: *mut c_char,
+}
+
+#[cfg(feature = "embedded-flameshot")]
+unsafe extern "C" {
+    fn codex_flameshot_capture_region(
+        request: *const CodexFlameshotCaptureRequest,
+        result: *mut CodexFlameshotCaptureResult,
+    ) -> i32;
+    fn codex_flameshot_capture_result_free(result: *mut CodexFlameshotCaptureResult);
+}
+
+#[cfg(feature = "embedded-flameshot")]
+fn run_embedded_flameshot_gui(
+    output_path: &Path,
+    options: FlameshotOptions,
+) -> Result<Vec<u8>, FlameshotRunError> {
+    let output_path_c = path_to_cstring(output_path)?;
+    let request = CodexFlameshotCaptureRequest {
+        output_path: output_path_c.as_ptr(),
+        delay_ms: options.delay_ms.min(u32::MAX as u64) as u32,
+        accept_on_select: u8::from(options.accept_on_select),
+    };
+    let mut result = CodexFlameshotCaptureResult {
+        message: std::ptr::null_mut(),
+    };
+    let code = unsafe { codex_flameshot_capture_region(&request, &mut result) };
+    let message = unsafe { embedded_flameshot_message(&result) };
+    unsafe { codex_flameshot_capture_result_free(&mut result) };
+
+    match code {
+        0 => {
+            if let Some(bytes) = read_nonempty_file_after_flush(output_path) {
+                let _ = fs::remove_file(output_path);
+                Ok(bytes)
+            } else {
+                Err(FlameshotRunError::Cancelled(message.unwrap_or_else(|| {
+                    "已取消区域截图或未保存截图".to_string()
+                })))
+            }
+        }
+        1 => Err(FlameshotRunError::Cancelled(
+            message.unwrap_or_else(|| "已取消区域截图".to_string()),
+        )),
+        _ => Err(FlameshotRunError::Unavailable(
+            message.unwrap_or_else(|| "嵌入式 Flameshot 截图失败".to_string()),
+        )),
+    }
+}
+
+#[cfg(feature = "embedded-flameshot")]
+fn path_to_cstring(path: &Path) -> Result<CString, FlameshotRunError> {
+    CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| FlameshotRunError::Unavailable("截图输出路径包含非法空字符".to_string()))
+}
+
+#[cfg(feature = "embedded-flameshot")]
+unsafe fn embedded_flameshot_message(result: &CodexFlameshotCaptureResult) -> Option<String> {
+    if result.message.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr(result.message) }
+            .to_string_lossy()
+            .trim()
+            .to_string(),
+    )
+    .filter(|message| !message.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -647,6 +778,29 @@ mod tests {
         }));
         assert!(!options.accept_on_select);
         assert_eq!(options.delay_ms, 3_000);
+    }
+
+    #[cfg(not(feature = "embedded-flameshot"))]
+    #[test]
+    fn region_screenshot_backend_defaults_to_bundled_process() {
+        assert_eq!(
+            region_screenshot_backend(),
+            RegionScreenshotBackend::BundledFlameshotProcess
+        );
+        assert_eq!(region_screenshot_backend().provider_name(), "flameshot");
+    }
+
+    #[cfg(feature = "embedded-flameshot")]
+    #[test]
+    fn region_screenshot_backend_uses_embedded_flameshot_feature() {
+        assert_eq!(
+            region_screenshot_backend(),
+            RegionScreenshotBackend::EmbeddedFlameshot
+        );
+        assert_eq!(
+            region_screenshot_backend().provider_name(),
+            "flameshot-embedded"
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
