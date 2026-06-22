@@ -5,6 +5,59 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-PeDependentDlls {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$BinaryPath
+  )
+
+  $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+  if ($dumpbin) {
+    $output = & $dumpbin.Source /DEPENDENTS $BinaryPath 2>&1
+  } else {
+    $link = Get-Command link.exe -ErrorAction SilentlyContinue
+    if (-not $link) {
+      throw "dumpbin.exe or link.exe is required to verify Windows runtime dependencies"
+    }
+    $output = & $link.Source /DUMP /DEPENDENTS $BinaryPath 2>&1
+  }
+
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to inspect PE dependencies for ${BinaryPath}: $($output -join [Environment]::NewLine)"
+  }
+
+  $dlls = @()
+  foreach ($line in $output) {
+    if ($line -match '^\s*([A-Za-z0-9_.+-]+\.dll)\s*$') {
+      $dlls += $Matches[1]
+    }
+  }
+  return $dlls | Sort-Object -Unique
+}
+
+function Assert-NoDebugQtDependencies {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$BinaryPath,
+    [Parameter(Mandatory = $true)]
+    [string]$AppPath
+  )
+
+  $dlls = Get-PeDependentDlls -BinaryPath $BinaryPath
+  $debugQtDlls = $dlls | Where-Object { $_ -match '^Qt6[A-Za-z0-9_]*d\.dll$' }
+  if ($debugQtDlls) {
+    throw "Release package binary depends on debug Qt DLL(s): $([string]::Join(', ', $debugQtDlls)) in $BinaryPath"
+  }
+
+  $qtDlls = $dlls | Where-Object { $_ -match '^Qt6[A-Za-z0-9_]*\.dll$' }
+  foreach ($qtDll in $qtDlls) {
+    $qtPath = Join-Path $AppPath $qtDll
+    if (-not (Test-Path $qtPath)) {
+      throw "Qt runtime dependency imported by $BinaryPath was not staged: $qtDll"
+    }
+  }
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $appPath = if ([System.IO.Path]::IsPathRooted($AppDir)) {
   $AppDir
@@ -59,5 +112,12 @@ foreach ($relative in $required) {
     throw "Missing embedded Flameshot runtime dependency: $path"
   }
 }
+
+Assert-NoDebugQtDependencies `
+  -BinaryPath (Join-Path $appPath "codex-plus-plus.exe") `
+  -AppPath $appPath
+Assert-NoDebugQtDependencies `
+  -BinaryPath (Join-Path $appPath "codex_flameshot_embedded.dll") `
+  -AppPath $appPath
 
 Write-Host "Embedded Flameshot runtime staged at $appPath"

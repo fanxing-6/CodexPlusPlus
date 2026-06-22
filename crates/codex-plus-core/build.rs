@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CODEX_FLAMESHOT_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=CODEX_FLAMESHOT_CMAKE_BUILD_TYPE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBEDDED_FLAMESHOT");
 
     let Some(workspace_dir) = workspace_dir() else {
@@ -44,12 +45,16 @@ fn main() {
     std::fs::create_dir_all(&lib_dir).expect("failed to create embedded Flameshot lib dir");
     std::fs::create_dir_all(&bin_dir).expect("failed to create embedded Flameshot bin dir");
 
+    let cmake_build_type =
+        env::var("CODEX_FLAMESHOT_CMAKE_BUILD_TYPE").unwrap_or_else(|_| "Release".to_string());
+
     run(
         Command::new("cmake")
             .arg("-S")
             .arg(&native_dir)
             .arg("-B")
             .arg(&build_dir)
+            .arg(format!("-DCMAKE_BUILD_TYPE={cmake_build_type}"))
             .arg(format!("-DFLAMESHOT_SOURCE_DIR={}", source_dir.display()))
             .arg(format!(
                 "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}",
@@ -83,7 +88,7 @@ fn main() {
             .arg("--build")
             .arg(&build_dir)
             .arg("--config")
-            .arg("Release"),
+            .arg(&cmake_build_type),
         "build embedded Flameshot",
     );
 
