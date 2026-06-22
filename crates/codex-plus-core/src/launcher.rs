@@ -932,7 +932,11 @@ async fn handle_helper_connection(
                 "application/json; charset=utf-8".to_string(),
                 "helper.diagnostics_log_ok",
             )
-        } else if path == "/screenshot/capture" && matches!(method, "POST" | "OPTIONS") {
+        } else if matches!(
+            path,
+            "/screenshot/capture" | "/screenshot/start" | "/screenshot/status"
+        ) && matches!(method, "POST" | "OPTIONS")
+        {
             let result = if method == "POST" {
                 let payload = serde_json::from_str::<serde_json::Value>(request_body)
                     .unwrap_or_else(|error| {
@@ -941,27 +945,40 @@ async fn handle_helper_connection(
                             "raw": request_body
                         })
                     });
-                crate::screenshot::capture_screenshot_response(&payload)
+                match path {
+                    "/screenshot/start" => crate::screenshot::start_screenshot_response(&payload),
+                    "/screenshot/status" => crate::screenshot::screenshot_status_response(&payload),
+                    _ => crate::screenshot::capture_screenshot_response(&payload),
+                }
             } else {
                 serde_json::json!({
                     "status": "ok",
                     "message": "截图接口可用"
                 })
             };
-            let ok = result
+            let status = result
                 .get("status")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                == "ok";
+                .unwrap_or_default();
+            let ok = matches!(status, "ok" | "started" | "running" | "cancelled");
+            let log_event = match (path, ok) {
+                ("/screenshot/start", true) => "helper.screenshot_start_ok",
+                ("/screenshot/start", false) => "helper.screenshot_start_failed",
+                ("/screenshot/status", true) => "helper.screenshot_status_ok",
+                ("/screenshot/status", false) => "helper.screenshot_status_failed",
+                (_, true) => "helper.screenshot_capture_ok",
+                (_, false) => "helper.screenshot_capture_failed",
+            };
             (
-                if ok { "200 OK" } else { "500 Internal Server Error" }.to_string(),
+                if ok {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                }
+                .to_string(),
                 serde_json::to_vec(&result)?,
                 "application/json; charset=utf-8".to_string(),
-                if ok {
-                    "helper.screenshot_capture_ok"
-                } else {
-                    "helper.screenshot_capture_failed"
-                },
+                log_event,
             )
         } else if path == "/overlay/image" && matches!(method, "GET" | "OPTIONS") {
             if method == "OPTIONS" {

@@ -6025,6 +6025,11 @@
     } catch (_) {}
   }
 
+  function screenshotDefaultDelayMs() {
+    const platformText = `${navigator.platform || ""} ${navigator.userAgent || ""}`;
+    return /mac/i.test(platformText) ? 900 : 150;
+  }
+
   function screenshotPointerPayload(event) {
     const fallbackX = Math.round((Number(window.screenX) || 0) + (Number(window.innerWidth) || 0) / 2);
     const fallbackY = Math.round((Number(window.screenY) || 0) + (Number(window.innerHeight) || 0) / 2);
@@ -6039,12 +6044,19 @@
       screenY,
       mode: "region",
       hideCodexWindow: screenshotHideCodexEnabled(),
+      acceptOnSelect: true,
+      delayMs: screenshotDefaultDelayMs(),
     };
   }
 
-  async function captureScreenshotFromHelper(payload) {
+  function screenshotSleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function screenshotPostJson(path, payload) {
+    let helperError = null;
     try {
-      const response = await fetch(`${helperBase}/screenshot/capture`, {
+      const response = await fetch(`${helperBase}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload || {}),
@@ -6053,11 +6065,38 @@
       if (!response.ok && !result?.message) {
         return { status: "failed", message: `截图接口返回 ${response.status}` };
       }
-      return result;
+      if (result?.status) return result;
     } catch (error) {
-      const fallback = await postJson("/screenshot/capture", payload || {});
-      return fallback?.status ? fallback : { status: "failed", message: error?.message || "截图接口不可用" };
+      helperError = error;
     }
+    try {
+      const fallback = await postJson(path, payload || {});
+      if (fallback?.status) return fallback;
+    } catch (error) {
+      return { status: "failed", message: error?.message || helperError?.message || "截图接口不可用" };
+    }
+    return { status: "failed", message: helperError?.message || "截图接口不可用" };
+  }
+
+  async function captureScreenshotFromHelper(payload) {
+    const start = await screenshotPostJson("/screenshot/start", payload || {});
+    if (!start || !["started", "running"].includes(start.status)) {
+      if (start?.message && /未知后端路径|bridge_missing|桥接不可用/i.test(start.message)) {
+        return screenshotPostJson("/screenshot/capture", payload || {});
+      }
+      return start?.status ? start : { status: "failed", message: "截图任务启动失败" };
+    }
+    const jobId = start.jobId;
+    if (!jobId) return { status: "failed", message: "截图任务缺少编号" };
+
+    const deadline = Date.now() + 195000;
+    while (Date.now() < deadline) {
+      await screenshotSleep(380);
+      const result = await screenshotPostJson("/screenshot/status", { jobId });
+      if (result?.status === "running" || result?.status === "started") continue;
+      return result?.status ? result : { status: "failed", message: "截图任务状态异常" };
+    }
+    return { status: "failed", message: "等待截图选择超时" };
   }
 
   function screenshotFileFromPayload(filePayload) {
@@ -6194,7 +6233,7 @@
     button.dataset.loading = "true";
     button.setAttribute("aria-busy", "true");
     const payload = screenshotPointerPayload(event);
-    showScreenshotToast(payload.hideCodexWindow ? "隐藏 Codex 后选择截图区域..." : "选择截图区域...");
+    showScreenshotToast(payload.hideCodexWindow ? "隐藏 Codex 后框选截图区域..." : "移到目标显示器后框选截图区域...");
     try {
       const result = await captureScreenshotFromHelper(payload);
       if (result?.status === "cancelled") {

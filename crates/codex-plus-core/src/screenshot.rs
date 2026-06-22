@@ -1,19 +1,27 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use serde_json::{Value, json};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
+
+const COMPLETED_JOB_TTL_MS: u128 = 5 * 60 * 1000;
+const RUNNING_JOB_TTL_MS: u128 = 4 * 60 * 1000;
+static NEXT_SCREENSHOT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+static SCREENSHOT_JOBS: OnceLock<Mutex<HashMap<String, ScreenshotJob>>> = OnceLock::new();
 
 pub fn capture_screenshot_response(payload: &Value) -> Value {
     match capture_screenshot(payload) {
@@ -25,6 +33,99 @@ pub fn capture_screenshot_response(payload: &Value) -> Value {
         Err(ScreenshotCaptureError::Failed(error)) => json!({
             "status": "failed",
             "message": format!("截图失败：{error}")
+        }),
+    }
+}
+
+pub fn start_screenshot_response(payload: &Value) -> Value {
+    let started_at_ms = now_ms();
+    let mut jobs = screenshot_jobs()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cleanup_screenshot_jobs_locked(&mut jobs, started_at_ms);
+    if let Some((job_id, job)) = jobs
+        .iter()
+        .find(|(_, job)| matches!(job.state, ScreenshotJobState::Running))
+    {
+        return json!({
+            "status": "running",
+            "jobId": job_id,
+            "startedAtMs": job.started_at_ms,
+            "message": "已有截图选择窗口正在等待操作"
+        });
+    }
+
+    let job_id = new_screenshot_job_id(started_at_ms);
+    jobs.insert(
+        job_id.clone(),
+        ScreenshotJob {
+            started_at_ms,
+            updated_at_ms: started_at_ms,
+            state: ScreenshotJobState::Running,
+        },
+    );
+    drop(jobs);
+
+    let job_id_for_thread = job_id.clone();
+    let payload_for_thread = payload.clone();
+    thread::spawn(move || {
+        let result = capture_screenshot_response(&payload_for_thread);
+        finish_screenshot_job(&job_id_for_thread, result);
+    });
+
+    json!({
+        "status": "started",
+        "jobId": job_id,
+        "startedAtMs": started_at_ms,
+        "message": "截图选择窗口已打开"
+    })
+}
+
+pub fn screenshot_status_response(payload: &Value) -> Value {
+    let job_id = payload
+        .get("jobId")
+        .or_else(|| payload.get("job_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if job_id.is_empty() {
+        return json!({
+            "status": "failed",
+            "message": "缺少截图任务编号"
+        });
+    }
+
+    let now = now_ms();
+    let mut jobs = screenshot_jobs()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cleanup_screenshot_jobs_locked(&mut jobs, now);
+    match jobs.get(job_id) {
+        Some(ScreenshotJob {
+            started_at_ms,
+            state: ScreenshotJobState::Running,
+            ..
+        }) => json!({
+            "status": "running",
+            "jobId": job_id,
+            "startedAtMs": started_at_ms,
+            "message": "等待选择截图区域"
+        }),
+        Some(ScreenshotJob {
+            started_at_ms,
+            state: ScreenshotJobState::Finished(result),
+            ..
+        }) => {
+            let mut result = result.clone();
+            if let Some(object) = result.as_object_mut() {
+                object.insert("jobId".to_string(), json!(job_id));
+                object.insert("startedAtMs".to_string(), json!(started_at_ms));
+            }
+            result
+        }
+        None => json!({
+            "status": "failed",
+            "message": "截图任务不存在或已过期"
         }),
     }
 }
@@ -41,6 +142,25 @@ enum ScreenshotCaptureError {
     Failed(anyhow::Error),
 }
 
+#[derive(Clone)]
+struct ScreenshotJob {
+    started_at_ms: u128,
+    updated_at_ms: u128,
+    state: ScreenshotJobState,
+}
+
+#[derive(Clone)]
+enum ScreenshotJobState {
+    Running,
+    Finished(Value),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlameshotOptions {
+    delay_ms: u64,
+    accept_on_select: bool,
+}
+
 impl From<anyhow::Error> for ScreenshotCaptureError {
     fn from(error: anyhow::Error) -> Self {
         Self::Failed(error)
@@ -49,6 +169,7 @@ impl From<anyhow::Error> for ScreenshotCaptureError {
 
 fn capture_region_screenshot(payload: &Value) -> CaptureResult<Value> {
     let captured_at_ms = now_ms();
+    let flameshot_options = flameshot_options_from_payload(payload);
     let hide_guard = CodexWindowHideGuard::maybe_hide(
         payload
             .get("hideCodexWindow")
@@ -59,7 +180,7 @@ fn capture_region_screenshot(payload: &Value) -> CaptureResult<Value> {
         thread::sleep(Duration::from_millis(240));
     }
 
-    let png = capture_region_with_flameshot(captured_at_ms)?;
+    let png = capture_region_with_flameshot(captured_at_ms, flameshot_options)?;
     let (width, height) = png_dimensions(&png)?;
     Ok(json!({
         "status": "ok",
@@ -83,7 +204,10 @@ fn capture_region_screenshot(payload: &Value) -> CaptureResult<Value> {
     }))
 }
 
-fn capture_region_with_flameshot(captured_at_ms: u128) -> CaptureResult<Vec<u8>> {
+fn capture_region_with_flameshot(
+    captured_at_ms: u128,
+    options: FlameshotOptions,
+) -> CaptureResult<Vec<u8>> {
     let output_path = env::temp_dir().join(format!(
         "codex-plus-region-screenshot-{captured_at_ms}-{}.png",
         std::process::id()
@@ -95,7 +219,7 @@ fn capture_region_with_flameshot(captured_at_ms: u128) -> CaptureResult<Vec<u8>>
             "安装包缺少内置 Flameshot，请重新安装 Codex++ 或重新构建安装包"
         ))
     })?;
-    match run_flameshot_gui(&launcher, &output_path) {
+    match run_flameshot_gui(&launcher, &output_path, options) {
         Ok(bytes) => Ok(bytes),
         Err(FlameshotRunError::Cancelled(message)) => {
             let _ = fs::remove_file(&output_path);
@@ -123,23 +247,28 @@ enum FlameshotRunError {
 fn run_flameshot_gui(
     launcher: &FlameshotLauncher,
     output_path: &Path,
+    options: FlameshotOptions,
 ) -> Result<Vec<u8>, FlameshotRunError> {
     match launcher {
         FlameshotLauncher::Executable(command_path) => {
-            run_flameshot_executable(command_path, output_path)
+            run_flameshot_executable(command_path, output_path, options)
         }
         #[cfg(target_os = "macos")]
-        FlameshotLauncher::MacApp(app_bundle) => run_flameshot_macos_app(app_bundle, output_path),
+        FlameshotLauncher::MacApp(app_bundle) => {
+            run_flameshot_macos_app(app_bundle, output_path, options)
+        }
     }
 }
 
 fn run_flameshot_executable(
     command_path: &Path,
     output_path: &Path,
+    options: FlameshotOptions,
 ) -> Result<Vec<u8>, FlameshotRunError> {
     let _ = fs::remove_file(output_path);
     let mut command = Command::new(command_path);
-    command.arg("gui").arg("--path").arg(output_path);
+    command.arg("gui");
+    append_flameshot_gui_args(&mut command, output_path, options);
     if let Some(dir) = command_path.parent() {
         command.current_dir(dir);
     }
@@ -177,16 +306,18 @@ fn run_flameshot_executable(
 fn run_flameshot_macos_app(
     app_bundle: &Path,
     output_path: &Path,
+    options: FlameshotOptions,
 ) -> Result<Vec<u8>, FlameshotRunError> {
     let _ = fs::remove_file(output_path);
-    let mut child = Command::new("/usr/bin/open")
+    let mut command = Command::new("/usr/bin/open");
+    command
         .arg("-W")
         .arg("-n")
         .arg(app_bundle)
         .arg("--args")
-        .arg("gui")
-        .arg("--path")
-        .arg(output_path)
+        .arg("gui");
+    append_flameshot_gui_args(&mut command, output_path, options);
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -250,6 +381,44 @@ fn run_flameshot_macos_app(
         }
         thread::sleep(Duration::from_millis(120));
     }
+}
+
+fn append_flameshot_gui_args(command: &mut Command, output_path: &Path, options: FlameshotOptions) {
+    if options.delay_ms > 0 {
+        command.arg("--delay").arg(options.delay_ms.to_string());
+    }
+    if options.accept_on_select {
+        command.arg("--accept-on-select");
+    }
+    command.arg("--path").arg(output_path);
+}
+
+fn flameshot_options_from_payload(payload: &Value) -> FlameshotOptions {
+    let delay_ms = payload
+        .get("delayMs")
+        .or_else(|| payload.get("delay_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(default_flameshot_delay_ms)
+        .min(3_000);
+    let accept_on_select = payload
+        .get("acceptOnSelect")
+        .or_else(|| payload.get("accept_on_select"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    FlameshotOptions {
+        delay_ms,
+        accept_on_select,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_flameshot_delay_ms() -> u64 {
+    900
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_flameshot_delay_ms() -> u64 {
+    150
 }
 
 fn command_output_details(stdout: &[u8], stderr: &[u8]) -> String {
@@ -411,6 +580,36 @@ impl Drop for CodexWindowHideGuard {
     }
 }
 
+fn screenshot_jobs() -> &'static Mutex<HashMap<String, ScreenshotJob>> {
+    SCREENSHOT_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn new_screenshot_job_id(now: u128) -> String {
+    let sequence = NEXT_SCREENSHOT_JOB_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{now:x}-{sequence:x}")
+}
+
+fn finish_screenshot_job(job_id: &str, result: Value) {
+    let now = now_ms();
+    let mut jobs = screenshot_jobs()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(job) = jobs.get_mut(job_id) {
+        job.updated_at_ms = now;
+        job.state = ScreenshotJobState::Finished(result);
+    }
+    cleanup_screenshot_jobs_locked(&mut jobs, now);
+}
+
+fn cleanup_screenshot_jobs_locked(jobs: &mut HashMap<String, ScreenshotJob>, now: u128) {
+    jobs.retain(|_, job| match job.state {
+        ScreenshotJobState::Running => now.saturating_sub(job.started_at_ms) <= RUNNING_JOB_TTL_MS,
+        ScreenshotJobState::Finished(_) => {
+            now.saturating_sub(job.updated_at_ms) <= COMPLETED_JOB_TTL_MS
+        }
+    });
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -431,6 +630,23 @@ mod tests {
     #[test]
     fn rejects_invalid_png_header() {
         assert!(png_dimensions(b"not-a-png").is_err());
+    }
+
+    #[test]
+    fn screenshot_options_default_to_accept_on_select() {
+        let options = flameshot_options_from_payload(&json!({}));
+        assert!(options.accept_on_select);
+        assert_eq!(options.delay_ms, default_flameshot_delay_ms());
+    }
+
+    #[test]
+    fn screenshot_options_clamp_delay() {
+        let options = flameshot_options_from_payload(&json!({
+            "delayMs": 9_000,
+            "acceptOnSelect": false
+        }));
+        assert!(!options.accept_on_select);
+        assert_eq!(options.delay_ms, 3_000);
     }
 
     #[cfg(not(target_os = "macos"))]

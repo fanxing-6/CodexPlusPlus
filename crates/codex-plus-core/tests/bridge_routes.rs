@@ -33,6 +33,9 @@ async fn bridge_routes_cover_all_current_paths() {
         ("/manager/open", json!({})),
         ("/backend/status", json!({})),
         ("/backend/repair", json!({})),
+        ("/screenshot/capture", json!({})),
+        ("/screenshot/start", json!({})),
+        ("/screenshot/status", json!({"jobId": "test-job"})),
         ("/codex-model-catalog", json!({})),
         ("/codex-config-model", json!({})),
         ("/ads", json!({})),
@@ -1068,6 +1071,14 @@ impl BridgeRuntimeService for FakeRuntime {
 
     async fn capture_screenshot(&self, _payload: Value) -> anyhow::Result<Value> {
         Ok(json!({"status": "ok", "files": []}))
+    }
+
+    async fn start_screenshot(&self, _payload: Value) -> anyhow::Result<Value> {
+        Ok(json!({"status": "started", "jobId": "test-job"}))
+    }
+
+    async fn screenshot_status(&self, payload: Value) -> anyhow::Result<Value> {
+        Ok(json!({"status": "running", "jobId": payload["jobId"].clone()}))
     }
 
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {

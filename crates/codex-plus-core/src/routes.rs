@@ -79,6 +79,12 @@ pub trait BridgeRuntimeService: Send + Sync {
     async fn backend_status(&self) -> anyhow::Result<Value>;
     async fn repair_backend(&self) -> anyhow::Result<Value>;
     async fn capture_screenshot(&self, payload: Value) -> anyhow::Result<Value>;
+    async fn start_screenshot(&self, payload: Value) -> anyhow::Result<Value> {
+        Ok(crate::screenshot::start_screenshot_response(&payload))
+    }
+    async fn screenshot_status(&self, payload: Value) -> anyhow::Result<Value> {
+        Ok(crate::screenshot::screenshot_status_response(&payload))
+    }
     async fn codex_model_catalog(&self) -> anyhow::Result<Value>;
     async fn ads(&self) -> anyhow::Result<Value>;
     async fn zed_remote_status(&self) -> anyhow::Result<Value>;
@@ -168,6 +174,8 @@ pub async fn handle_bridge_request(
         "/backend/status" => ctx.runtime.backend_status().await,
         "/backend/repair" => ctx.runtime.repair_backend().await,
         "/screenshot/capture" => ctx.runtime.capture_screenshot(payload.clone()).await,
+        "/screenshot/start" => ctx.runtime.start_screenshot(payload.clone()).await,
+        "/screenshot/status" => ctx.runtime.screenshot_status(payload.clone()).await,
         "/codex-model-catalog" | "/codex-config-model" => ctx.runtime.codex_model_catalog().await,
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
         "/ads" => ctx.runtime.ads().await,
