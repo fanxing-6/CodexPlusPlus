@@ -53,6 +53,10 @@ jobs:
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
           Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
 
+      - name: Bundle Flameshot
+        shell: pwsh
+        run: ./scripts/vendor/download-flameshot-windows.ps1 -Destination dist/windows/app/tools/flameshot
+
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -121,6 +125,9 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Bundle Flameshot
+        run: bash scripts/vendor/download-flameshot-macos.sh "${{ matrix.arch }}" "dist/vendor/flameshot/${{ matrix.arch }}"
+
       - name: Build macOS DMG
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -144,6 +151,7 @@ jobs:
             codesign -dv "$app" >/dev/null 2>&1
             echo "verified: $app"
           done
+          test -x "dist/macos/stage/Codex++.app/Contents/Resources/tools/flameshot/flameshot.app/Contents/MacOS/flameshot"
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4

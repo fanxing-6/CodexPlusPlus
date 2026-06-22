@@ -10,39 +10,39 @@ use std::path::PathBuf;
 #[cfg(windows)]
 use anyhow::Context;
 #[cfg(windows)]
-use windows::Win32::Foundation::{BOOL, CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH};
+use windows::core::{Interface, PCWSTR, PWSTR};
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, MAX_PATH};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize, IPersistFile,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 #[cfg(windows)]
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 #[cfg(windows)]
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ, REG_SZ, RegCloseKey,
-    RegCreateKeyW, RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW, RegSetValueExW,
+    RegCloseKey, RegCreateKeyW, RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW,
+    RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ, REG_SZ,
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
-    TerminateProcess,
+    OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW, ShellLink,
+    FOLDERID_Desktop, IShellLinkW, SHGetKnownFolderPath, ShellExecuteW, ShellLink, KF_FLAG_DEFAULT,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+    ShowWindow, SW_HIDE, SW_RESTORE,
 };
-#[cfg(windows)]
-use windows::core::{Interface, PCWSTR, PWSTR};
 
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -54,6 +54,13 @@ pub struct WindowsProcessInfo {
     pub parent_process_id: u32,
     pub exe_file: String,
     pub executable_path: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenWindow {
+    hwnd: usize,
+    pub process_id: u32,
 }
 
 #[cfg(windows)]
@@ -353,6 +360,38 @@ pub fn activate_process_window(process_id: u32) -> bool {
 }
 
 #[cfg(windows)]
+pub fn hide_process_windows(process_ids: &[u32]) -> Vec<HiddenWindow> {
+    if process_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut state = HideWindowsState {
+        process_ids: process_ids.to_vec(),
+        windows: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(hide_process_window_proc),
+            LPARAM((&mut state as *mut HideWindowsState) as isize),
+        );
+    }
+    state.windows
+}
+
+#[cfg(windows)]
+pub fn restore_hidden_windows(windows: &[HiddenWindow]) {
+    for window in windows.iter().rev() {
+        let hwnd = HWND(window.hwnd as *mut core::ffi::c_void);
+        if hwnd.is_invalid() {
+            continue;
+        }
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn query_process_image_path(process_id: u32) -> Option<PathBuf> {
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()? };
     if handle.is_invalid() {
@@ -380,6 +419,12 @@ struct ActivateWindowState {
 }
 
 #[cfg(windows)]
+struct HideWindowsState {
+    process_ids: Vec<u32>,
+    windows: Vec<HiddenWindow>,
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn find_process_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let state = unsafe { &mut *(lparam.0 as *mut ActivateWindowState) };
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
@@ -392,6 +437,28 @@ unsafe extern "system" fn find_process_window_proc(hwnd: HWND, lparam: LPARAM) -
     if window_process_id == state.process_id {
         state.hwnd = hwnd;
         return BOOL(0);
+    }
+    BOOL(1)
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn hide_process_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let state = unsafe { &mut *(lparam.0 as *mut HideWindowsState) };
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return BOOL(1);
+    }
+    let mut window_process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut window_process_id));
+    }
+    if state.process_ids.contains(&window_process_id) {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        state.windows.push(HiddenWindow {
+            hwnd: hwnd.0 as usize,
+            process_id: window_process_id,
+        });
     }
     BOOL(1)
 }

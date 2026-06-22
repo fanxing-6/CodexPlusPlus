@@ -23,6 +23,7 @@
   const zedRemoteOpenInMenuItemClass = "codex-zed-open-in-menu-item";
   const zedRemoteToastClass = "codex-zed-remote-toast";
   const screenshotButtonClass = "codex-screenshot-button";
+  const screenshotHideCodexClass = "codex-screenshot-hide-codex";
   const screenshotToastClass = "codex-screenshot-toast";
   const upstreamWorktreeDialogClass = "codex-upstream-worktree-dialog";
   const upstreamBranchOptionAttribute = "data-codex-upstream-branch-option";
@@ -43,7 +44,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "16";
+  const codexDeleteStyleVersion = "17";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
   const codexDeleteVersion = "7";
@@ -59,7 +60,8 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
-  const codexScreenshotButtonVersion = "2";
+  const codexScreenshotButtonVersion = "3";
+  const codexScreenshotHideCodexKey = "codexScreenshotHideCodex";
   let codexPlusVersion = window.__CODEX_PLUS_VERSION__ || "unknown";
   const codexPlusBuild = window.__CODEX_PLUS_BUILD__ || "unknown";
   const codexPlusSettingsKey = "codexPlusSettings";
@@ -293,6 +295,19 @@
       .${screenshotButtonClass}[data-loading="true"] {
         opacity: .62;
         pointer-events: none;
+      }
+      .${screenshotHideCodexClass} {
+        width: 14px;
+        height: 14px;
+        min-width: 14px;
+        flex: 0 0 14px;
+        margin: 0 2px 0 -4px;
+        accent-color: #2ee59d;
+        cursor: pointer;
+      }
+      .${screenshotHideCodexClass}:focus-visible {
+        outline: 2px solid rgba(46,229,157,.65);
+        outline-offset: 2px;
       }
       .${screenshotToastClass} {
         position: fixed;
@@ -6000,6 +6015,16 @@
     }, status === "failed" ? 4200 : 2400);
   }
 
+  function screenshotHideCodexEnabled() {
+    return localStorage.getItem(codexScreenshotHideCodexKey) === "true";
+  }
+
+  function setScreenshotHideCodexEnabled(enabled) {
+    try {
+      localStorage.setItem(codexScreenshotHideCodexKey, enabled ? "true" : "false");
+    } catch (_) {}
+  }
+
   function screenshotPointerPayload(event) {
     const fallbackX = Math.round((Number(window.screenX) || 0) + (Number(window.innerWidth) || 0) / 2);
     const fallbackY = Math.round((Number(window.screenY) || 0) + (Number(window.innerHeight) || 0) / 2);
@@ -6012,7 +6037,8 @@
     return {
       screenX,
       screenY,
-      allDisplays: !!event?.altKey,
+      mode: "region",
+      hideCodexWindow: screenshotHideCodexEnabled(),
     };
   }
 
@@ -6167,9 +6193,14 @@
   async function captureAndAttachScreenshot(event, button) {
     button.dataset.loading = "true";
     button.setAttribute("aria-busy", "true");
-    showScreenshotToast(event?.altKey ? "正在截取全部显示器..." : "正在截图...");
+    const payload = screenshotPointerPayload(event);
+    showScreenshotToast(payload.hideCodexWindow ? "隐藏 Codex 后选择截图区域..." : "选择截图区域...");
     try {
-      const result = await captureScreenshotFromHelper(screenshotPointerPayload(event));
+      const result = await captureScreenshotFromHelper(payload);
+      if (result?.status === "cancelled") {
+        showScreenshotToast(result?.message || "已取消截图");
+        return;
+      }
       if (result?.status !== "ok") {
         throw new Error(result?.message || "截图失败");
       }
@@ -6235,11 +6266,45 @@
     }, true);
   }
 
+  function wireScreenshotHideCheckbox(checkbox) {
+    if (checkbox.dataset.codexScreenshotWired === codexScreenshotButtonVersion) return;
+    checkbox.dataset.codexScreenshotWired = codexScreenshotButtonVersion;
+    checkbox.addEventListener("click", (event) => {
+      event.stopPropagation();
+    }, true);
+    checkbox.addEventListener("change", () => {
+      setScreenshotHideCodexEnabled(checkbox.checked);
+    });
+  }
+
+  function installScreenshotHideCheckbox(parent, button) {
+    const existingCheckboxes = Array.from(document.querySelectorAll(`.${screenshotHideCodexClass}`));
+    let checkbox = existingCheckboxes[0] || null;
+    existingCheckboxes.forEach((node) => {
+      if (node !== checkbox) node.remove();
+    });
+    if (!checkbox || checkbox.dataset.codexScreenshotButtonVersion !== codexScreenshotButtonVersion) {
+      checkbox?.remove();
+      checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = screenshotHideCodexClass;
+      checkbox.dataset.codexScreenshotButtonVersion = codexScreenshotButtonVersion;
+      checkbox.setAttribute("aria-label", "截图时隐藏 Codex");
+      checkbox.setAttribute("title", "截图时隐藏 Codex");
+    }
+    checkbox.checked = screenshotHideCodexEnabled();
+    wireScreenshotHideCheckbox(checkbox);
+    if (checkbox.parentElement !== parent || checkbox.previousElementSibling !== button) {
+      parent.insertBefore(checkbox, button.nextSibling);
+    }
+  }
+
   function installScreenshotButton() {
     const placement = screenshotButtonPlacement();
     const existingButtons = Array.from(document.querySelectorAll(`.${screenshotButtonClass}`));
     if (!placement?.parent) {
       existingButtons.forEach((button) => button.remove());
+      document.querySelectorAll(`.${screenshotHideCodexClass}`).forEach((checkbox) => checkbox.remove());
       return;
     }
     let button = existingButtons[0] || null;
@@ -6253,8 +6318,8 @@
       button.className = screenshotButtonClass;
       button.dataset.codexScreenshotButtonVersion = codexScreenshotButtonVersion;
       button.dataset.codexScreenshotButton = "true";
-      button.setAttribute("aria-label", "截图");
-      button.setAttribute("title", "截图；按住 Alt/Option 点击可截取全部显示器");
+      button.setAttribute("aria-label", "区域截图");
+      button.setAttribute("title", "区域截图");
       button.innerHTML = screenshotIconSvg();
     }
     wireScreenshotButton(button);
@@ -6262,6 +6327,7 @@
     if (button.parentElement !== placement.parent || button.nextSibling !== before) {
       placement.parent.insertBefore(button, before);
     }
+    installScreenshotHideCheckbox(placement.parent, button);
   }
 
   function sidebarProjectRows() {
@@ -9070,7 +9136,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${screenshotButtonClass}, .${screenshotToastClass}, .codex-zed-remote-button, .codex-zed-remote-toast, #codex-plus-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${screenshotButtonClass}, .${screenshotHideCodexClass}, .${screenshotToastClass}, .codex-zed-remote-button, .codex-zed-remote-toast, #codex-plus-menu`);
   }
 
   function scanRelevantSelector() {

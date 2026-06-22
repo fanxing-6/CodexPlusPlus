@@ -34,12 +34,33 @@ prepare_icon() {
   iconutil -c icns "$iconset" -o "$ICON_ICNS"
 }
 
+copy_bundled_flameshot() {
+  local app_dir="$1"
+  local source="${FLAMESHOT_BUNDLE_DIR:-$ROOT/dist/vendor/flameshot/$ARCH}"
+  local destination="$app_dir/Contents/Resources/tools/flameshot"
+
+  if [ ! -d "$source/flameshot.app" ]; then
+    echo "error: bundled Flameshot app not found: $source/flameshot.app" >&2
+    return 1
+  fi
+  rm -rf "$destination"
+  mkdir -p "$destination"
+  cp -R "$source/flameshot.app" "$destination/flameshot.app"
+  chmod -R u+w "$destination/flameshot.app"
+  xattr -cr "$destination/flameshot.app" >/dev/null 2>&1 || true
+  if [ ! -x "$destination/flameshot.app/Contents/MacOS/flameshot" ]; then
+    echo "error: bundled Flameshot executable missing in $destination" >&2
+    return 1
+  fi
+}
+
 create_app() {
   local app_name="$1"
   local executable_name="$2"
   local binary_path="$3"
   local bundle_id="$4"
   local lsui_element="${5:-false}"
+  local include_flameshot="${6:-false}"
   local app_dir="$STAGE/$app_name.app"
 
   if [ ! -x "$binary_path" ]; then
@@ -51,6 +72,9 @@ create_app() {
   mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
   cp "$binary_path" "$app_dir/Contents/MacOS/$executable_name"
   cp "$ICON_ICNS" "$app_dir/Contents/Resources/$ICON_NAME"
+  if [ "$include_flameshot" = "true" ]; then
+    copy_bundled_flameshot "$app_dir"
+  fi
   chmod +x "$app_dir/Contents/MacOS/$executable_name"
   printf 'APPL????' > "$app_dir/Contents/PkgInfo"
   cat > "$app_dir/Contents/Info.plist" <<PLIST
@@ -93,8 +117,11 @@ sign_app() {
   local app_dir="$1"
   local executable
   executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist")"
+  if [ -d "$app_dir/Contents/Resources/tools/flameshot/flameshot.app" ]; then
+    codesign --force --deep --sign - "$app_dir/Contents/Resources/tools/flameshot/flameshot.app"
+  fi
   codesign --force --sign - "$app_dir/Contents/MacOS/$executable"
-  codesign --force --sign - "$app_dir"
+  codesign --force --deep --sign - "$app_dir"
 }
 
 verify_app() {
@@ -118,7 +145,7 @@ verify_app() {
 }
 
 prepare_icon
-create_app "Codex++" "CodexPlusPlus" "$BINARY_DIR/codex-plus-plus" "com.bigpizzav3.codexplusplus" "true"
+create_app "Codex++" "CodexPlusPlus" "$BINARY_DIR/codex-plus-plus" "com.bigpizzav3.codexplusplus" "true" "true"
 create_app "Codex++ 管理工具" "CodexPlusPlusManager" "$BINARY_DIR/codex-plus-plus-manager" "com.bigpizzav3.codexplusplus.manager" "false"
 
 sign_app "$STAGE/Codex++.app"
