@@ -8,14 +8,15 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use serde_json::{Value, json};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -26,6 +27,7 @@ const COMPLETED_JOB_TTL_MS: u128 = 5 * 60 * 1000;
 const RUNNING_JOB_TTL_MS: u128 = 4 * 60 * 1000;
 static NEXT_SCREENSHOT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 static SCREENSHOT_JOBS: OnceLock<Mutex<HashMap<String, ScreenshotJob>>> = OnceLock::new();
+static SCREENSHOT_WORKER: OnceLock<mpsc::Sender<ScreenshotWork>> = OnceLock::new();
 
 pub fn capture_screenshot_response(payload: &Value) -> Value {
     match capture_screenshot(payload) {
@@ -70,12 +72,19 @@ pub fn start_screenshot_response(payload: &Value) -> Value {
     );
     drop(jobs);
 
-    let job_id_for_thread = job_id.clone();
-    let payload_for_thread = payload.clone();
-    thread::spawn(move || {
-        let result = capture_screenshot_response(&payload_for_thread);
-        finish_screenshot_job(&job_id_for_thread, result);
-    });
+    if let Err(message) = queue_screenshot_job(job_id.clone(), payload.clone()) {
+        let result = json!({
+            "status": "failed",
+            "message": message
+        });
+        finish_screenshot_job(&job_id, result);
+        return json!({
+            "status": "failed",
+            "jobId": job_id,
+            "startedAtMs": started_at_ms,
+            "message": message
+        });
+    }
 
     json!({
         "status": "started",
@@ -151,6 +160,11 @@ struct ScreenshotJob {
     started_at_ms: u128,
     updated_at_ms: u128,
     state: ScreenshotJobState,
+}
+
+struct ScreenshotWork {
+    job_id: String,
+    payload: Value,
 }
 
 #[derive(Clone)]
@@ -713,6 +727,36 @@ impl Drop for CodexWindowHideGuard {
 
 fn screenshot_jobs() -> &'static Mutex<HashMap<String, ScreenshotJob>> {
     SCREENSHOT_JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn queue_screenshot_job(job_id: String, payload: Value) -> Result<(), String> {
+    screenshot_worker_sender()
+        .send(ScreenshotWork { job_id, payload })
+        .map_err(|_| "截图工作线程已退出，请重启 Codex++ 后重试".to_string())
+}
+
+fn screenshot_worker_sender() -> &'static mpsc::Sender<ScreenshotWork> {
+    SCREENSHOT_WORKER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<ScreenshotWork>();
+        thread::Builder::new()
+            .name("codex-screenshot-worker".to_string())
+            .spawn(move || {
+                for work in receiver {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        capture_screenshot_response(&work.payload)
+                    }))
+                    .unwrap_or_else(|_| {
+                        json!({
+                            "status": "failed",
+                            "message": "截图工作线程发生异常，请重启 Codex++ 后重试"
+                        })
+                    });
+                    finish_screenshot_job(&work.job_id, result);
+                }
+            })
+            .expect("failed to start screenshot worker thread");
+        sender
+    })
 }
 
 fn new_screenshot_job_id(now: u128) -> String {

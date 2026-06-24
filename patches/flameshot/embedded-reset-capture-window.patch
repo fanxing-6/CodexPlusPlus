@@ -1,0 +1,18 @@
+diff --git a/src/core/flameshot.cpp b/src/core/flameshot.cpp
+index 10d3c67..6ab50e7 100644
+--- a/src/core/flameshot.cpp
++++ b/src/core/flameshot.cpp
+@@ -128,10 +128,12 @@ CaptureWidget* Flameshot::gui(const CaptureRequest& req)
+-#if defined(Q_OS_MACOS)
++#if defined(Q_OS_MACOS) || defined(CODEX_FLAMESHOT_EMBEDDED)
+     // This is required on MacOS because of Mission Control. If you'll switch to
+     // another Desktop you cannot take a new screenshot from the tray, you have
+     // to switch back to the Flameshot Desktop manually. It is not obvious and a
+     // large number of users are confused and report a bug.
++    // Codex++ embeds Flameshot in-process, so the same stale CaptureWidget
++    // guard is also required between repeated captures.
+     if (m_captureWindow != nullptr) {
+         m_captureWindow->close();
+         delete m_captureWindow;
+         m_captureWindow = nullptr;
+     }

@@ -116,6 +116,7 @@ target_include_directories(flameshot
 target_compile_definitions(flameshot
     PRIVATE
         CODEX_FLAMESHOT_BUILDING_DLL
+        CODEX_FLAMESHOT_EMBEDDED
         DISABLE_UPDATE_CHECKER
         APP_PREFIX=""
         APP_VERSION="v${PROJECT_VERSION}"

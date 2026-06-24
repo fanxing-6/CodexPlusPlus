@@ -25,6 +25,22 @@ fn main() {
                 .join("vendor")
                 .join("flameshot-src")
         });
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_dir.join("patches").join("flameshot").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source_dir.join(".codex-flameshot-patches").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source_dir
+            .join("src")
+            .join("core")
+            .join("flameshot.cpp")
+            .display()
+    );
     if !source_dir
         .join("src")
         .join("core")

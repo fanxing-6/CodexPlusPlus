@@ -13,6 +13,30 @@ qhotkey_commit="${CODEX_QHOTKEY_COMMIT:-d7063877c14d5ae2b489dc70bbe02e76a43bf38b
 kdsingleapplication_dir="${CODEX_KDSINGLEAPPLICATION_SOURCE_DIR:-"$vendor_root/kdsingleapplication-src"}"
 kdsingleapplication_commit="${CODEX_KDSINGLEAPPLICATION_COMMIT:-3186a158f8e6565e89f5983b4028c892737844ff}"
 
+apply_patch_once() {
+  local dir="$1"
+  local patch_file="$2"
+  local normalized_patch
+  normalized_patch="$(mktemp)"
+  tr -d '\r' < "$patch_file" > "$normalized_patch"
+
+  if git -C "$dir" apply --check "$normalized_patch"; then
+    git -C "$dir" apply "$normalized_patch"
+    rm -f "$normalized_patch"
+    return
+  fi
+
+  if git -C "$dir" apply --reverse --check "$normalized_patch"; then
+    echo "Patch already applied: $patch_file"
+    rm -f "$normalized_patch"
+    return
+  fi
+
+  rm -f "$normalized_patch"
+  echo "Failed to apply patch: $patch_file" >&2
+  exit 1
+}
+
 mkdir -p "$(dirname "$vendor_dir")"
 if [[ ! -d "$vendor_dir/.git" ]]; then
   rm -rf "$vendor_dir"
@@ -21,6 +45,7 @@ else
   git -C "$vendor_dir" fetch --depth 1 origin "refs/tags/$tag:refs/tags/$tag"
   git -C "$vendor_dir" checkout --detach "$tag"
 fi
+git -C "$vendor_dir" reset --hard "$expected_commit" >/dev/null
 
 actual_commit="$(git -C "$vendor_dir" rev-parse HEAD)"
 if [[ "$actual_commit" != "$expected_commit" ]]; then
@@ -28,6 +53,9 @@ if [[ "$actual_commit" != "$expected_commit" ]]; then
   exit 1
 fi
 
+flameshot_patch="$repo_root/patches/flameshot/embedded-reset-capture-window.patch"
+apply_patch_once "$vendor_dir" "$flameshot_patch"
+echo "embedded-reset-capture-window" > "$vendor_dir/.codex-flameshot-patches"
 echo "$actual_commit" > "$vendor_dir/.codex-flameshot-commit"
 
 prepare_pinned_checkout() {

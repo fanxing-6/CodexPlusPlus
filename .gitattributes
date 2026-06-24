@@ -5,4 +5,5 @@
 *.ps1 text eol=crlf
 
 *.sh text eol=lf
+*.patch text eol=lf
 .github/workflows/*.yml text eol=lf
