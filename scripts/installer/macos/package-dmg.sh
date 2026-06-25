@@ -53,6 +53,110 @@ copy_bundled_flameshot() {
   fi
 }
 
+find_embedded_flameshot_lib() {
+  if [ -n "${EMBEDDED_FLAMESHOT_LIB:-}" ]; then
+    printf '%s\n' "$EMBEDDED_FLAMESHOT_LIB"
+    return 0
+  fi
+
+  find "$ROOT/target" \
+    -path "*/out/flameshot-embedded-lib/libcodex_flameshot_embedded.dylib" \
+    -type f \
+    -print \
+    -quit 2>/dev/null || true
+}
+
+copy_embedded_flameshot_runtime() {
+  local app_dir="$1"
+  local lib_source
+  lib_source="$(find_embedded_flameshot_lib)"
+  if [ -z "$lib_source" ] || [ ! -f "$lib_source" ]; then
+    echo "error: embedded Flameshot dylib not found; set EMBEDDED_FLAMESHOT_LIB" >&2
+    return 1
+  fi
+
+  local frameworks_dir="$app_dir/Contents/Frameworks"
+  local lib_name="libcodex_flameshot_embedded.dylib"
+  mkdir -p "$frameworks_dir"
+  cp "$lib_source" "$frameworks_dir/$lib_name"
+  chmod +x "$frameworks_dir/$lib_name"
+  install_name_tool -id "@rpath/$lib_name" "$frameworks_dir/$lib_name"
+}
+
+copy_screenshot_runtime() {
+  local app_dir="$1"
+  if [ -n "${EMBEDDED_FLAMESHOT_LIB:-}" ] || [ "${CODEX_PLUS_EMBEDDED_FLAMESHOT:-}" = "1" ]; then
+    copy_embedded_flameshot_runtime "$app_dir"
+  else
+    copy_bundled_flameshot "$app_dir"
+  fi
+}
+
+patch_embedded_flameshot_linkage() {
+  local app_dir="$1"
+  local executable="$2"
+  local executable_path="$app_dir/Contents/MacOS/$executable"
+  local lib_name="libcodex_flameshot_embedded.dylib"
+  if [ ! -f "$app_dir/Contents/Frameworks/$lib_name" ]; then
+    return 0
+  fi
+
+  local linked_name
+  linked_name="$(otool -L "$executable_path" | awk '/libcodex_flameshot_embedded\.dylib/ { print $1; exit }')"
+  if [ -n "$linked_name" ] && [ "$linked_name" != "@rpath/$lib_name" ]; then
+    install_name_tool -change "$linked_name" "@rpath/$lib_name" "$executable_path"
+  fi
+  if ! otool -l "$executable_path" | grep -F "@executable_path/../Frameworks" >/dev/null; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$executable_path"
+  fi
+}
+
+deploy_qt_runtime_if_needed() {
+  local app_dir="$1"
+  if [ ! -f "$app_dir/Contents/Frameworks/libcodex_flameshot_embedded.dylib" ]; then
+    return 0
+  fi
+
+  local macdeployqt="${MACDEPLOYQT:-}"
+  if [ -z "$macdeployqt" ]; then
+    macdeployqt="$(command -v macdeployqt || true)"
+  fi
+  if [ -z "$macdeployqt" ] && command -v brew >/dev/null 2>&1; then
+    local qt_prefix
+    qt_prefix="$(brew --prefix qt 2>/dev/null || true)"
+    if [ -x "$qt_prefix/bin/macdeployqt" ]; then
+      macdeployqt="$qt_prefix/bin/macdeployqt"
+    fi
+  fi
+  if [ -z "$macdeployqt" ]; then
+    echo "error: macdeployqt not found; install Qt or set MACDEPLOYQT" >&2
+    return 1
+  fi
+
+  "$macdeployqt" "$app_dir" -always-overwrite
+}
+
+sign_embedded_runtime() {
+  local app_dir="$1"
+  if [ ! -d "$app_dir/Contents/Frameworks" ]; then
+    return 0
+  fi
+
+  while IFS= read -r -d '' framework; do
+    codesign --force --sign - "$framework"
+  done < <(find "$app_dir/Contents/Frameworks" -maxdepth 2 -type d -name "*.framework" -print0)
+
+  while IFS= read -r -d '' dylib; do
+    codesign --force --sign - "$dylib"
+  done < <(find "$app_dir/Contents/Frameworks" -type f -name "*.dylib" -print0)
+
+  if [ -d "$app_dir/Contents/PlugIns" ]; then
+    while IFS= read -r -d '' plugin; do
+      codesign --force --sign - "$plugin"
+    done < <(find "$app_dir/Contents/PlugIns" -type f \( -name "*.dylib" -o -perm -111 \) -print0)
+  fi
+}
+
 create_app() {
   local app_name="$1"
   local executable_name="$2"
@@ -72,7 +176,7 @@ create_app() {
   cp "$binary_path" "$app_dir/Contents/MacOS/$executable_name"
   cp "$ICON_ICNS" "$app_dir/Contents/Resources/$ICON_NAME"
   if [ "$include_flameshot" = "true" ]; then
-    copy_bundled_flameshot "$app_dir"
+    copy_screenshot_runtime "$app_dir"
   fi
   chmod +x "$app_dir/Contents/MacOS/$executable_name"
   printf 'APPL????' > "$app_dir/Contents/PkgInfo"
@@ -119,8 +223,11 @@ sign_app() {
   if [ -d "$app_dir/Contents/Helpers/Flameshot.app" ]; then
     codesign --verify --deep --strict "$app_dir/Contents/Helpers/Flameshot.app"
   fi
+  patch_embedded_flameshot_linkage "$app_dir" "$executable"
+  deploy_qt_runtime_if_needed "$app_dir"
+  sign_embedded_runtime "$app_dir"
   codesign --force --sign - "$app_dir/Contents/MacOS/$executable"
-  codesign --force --sign - "$app_dir"
+  codesign --force --deep --sign - "$app_dir"
 }
 
 verify_app() {
@@ -143,6 +250,11 @@ verify_app() {
   }
   if [ -d "$app_dir/Contents/Helpers/Flameshot.app" ]; then
     codesign --verify --deep --strict "$app_dir/Contents/Helpers/Flameshot.app" >/dev/null
+  fi
+  if [ -f "$app_dir/Contents/Frameworks/libcodex_flameshot_embedded.dylib" ]; then
+    codesign --verify --strict "$app_dir/Contents/Frameworks/libcodex_flameshot_embedded.dylib" >/dev/null
+    otool -L "$app_dir/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" |
+      grep -F "@rpath/libcodex_flameshot_embedded.dylib" >/dev/null
   fi
 }
 

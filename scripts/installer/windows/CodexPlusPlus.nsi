@@ -33,11 +33,7 @@ Section "Install"
   nsExec::ExecToLog 'taskkill /IM codex-plus-plus-manager.exe /F'
   Pop $0
 
-  File "${ROOT}\dist\windows\app\codex-plus-plus.exe"
-  File "${ROOT}\dist\windows\app\codex-plus-plus-manager.exe"
-  SetOutPath "$INSTDIR\tools\flameshot"
-  File /r "${ROOT}\dist\windows\app\tools\flameshot\*.*"
-  SetOutPath "$INSTDIR"
+  File /r "${ROOT}\dist\windows\app\*.*"
 
   Delete "$DESKTOP\Codex++ 绠＄悊宸ュ叿.lnk"
   Delete "$SMPROGRAMS\Codex++\Codex++ 绠＄悊宸ュ叿.lnk"
@@ -76,7 +72,19 @@ Section "Uninstall"
 
   Delete "$INSTDIR\codex-plus-plus.exe"
   Delete "$INSTDIR\codex-plus-plus-manager.exe"
+  Delete "$INSTDIR\codex_flameshot_embedded.dll"
+  Delete "$INSTDIR\Qt6*.dll"
+  Delete "$INSTDIR\D3Dcompiler_*.dll"
+  Delete "$INSTDIR\opengl32sw.dll"
   Delete "$INSTDIR\uninstall.exe"
+  RMDir /r "$INSTDIR\generic"
+  RMDir /r "$INSTDIR\iconengines"
+  RMDir /r "$INSTDIR\imageformats"
+  RMDir /r "$INSTDIR\networkinformation"
+  RMDir /r "$INSTDIR\platforms"
+  RMDir /r "$INSTDIR\styles"
+  RMDir /r "$INSTDIR\tls"
+  RMDir /r "$INSTDIR\translations"
   RMDir /r "$INSTDIR\tools"
   RMDir "$INSTDIR"
 

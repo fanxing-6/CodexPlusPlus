@@ -25,6 +25,33 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Configure Qt environment
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:QT_ROOT_DIR\bin\Qt6Svg.dll")) {
+            throw "QtSvg runtime was not installed with Qt at $env:QT_ROOT_DIR"
+          }
+          if (-not (Test-Path "$env:QT_ROOT_DIR\lib\cmake\Qt6Svg\Qt6SvgConfig.cmake")) {
+            throw "QtSvg CMake package was not installed with Qt at $env:QT_ROOT_DIR"
+          }
+          "CMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "Qt6_DIR=$env:QT_ROOT_DIR\lib\cmake\Qt6" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDEPLOYQT=$env:QT_ROOT_DIR\bin\windeployqt.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CMAKE_GENERATOR=NMake Makefiles" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Install NSIS
         run: choco install nsis -y
 
@@ -43,8 +70,14 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+      - name: Prepare Flameshot source
+        shell: bash
+        run: bash scripts/vendor/prepare-flameshot-source.sh
+
       - name: Build release binaries
-        run: cargo build --release
+        run: |
+          cargo build --release -p codex-plus-manager
+          cargo build --release -p codex-plus-launcher --features embedded-flameshot
 
       - name: Stage Windows app files
         shell: pwsh
@@ -53,9 +86,30 @@ jobs:
           Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
           Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
 
-      - name: Bundle Flameshot
+      - name: Stage embedded Flameshot runtime
         shell: pwsh
-        run: ./scripts/vendor/download-flameshot-windows.ps1 -Destination dist/windows/app/tools/flameshot
+        run: ./scripts/installer/windows/stage-embedded-flameshot.ps1 -AppDir dist/windows/app -BuildRoot target/release/build
+
+      - name: Verify embedded Windows runtime
+        shell: pwsh
+        run: |
+          $required = @(
+            "dist/windows/app/codex_flameshot_embedded.dll",
+            "dist/windows/app/Qt6Core.dll",
+            "dist/windows/app/Qt6Gui.dll",
+            "dist/windows/app/Qt6Widgets.dll",
+            "dist/windows/app/Qt6Network.dll",
+            "dist/windows/app/Qt6Svg.dll",
+            "dist/windows/app/platforms/qwindows.dll"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Missing required runtime file: $path"
+            }
+          }
+          if (Test-Path "dist/windows/app/tools/flameshot") {
+            throw "External Flameshot bundle should not be present in embedded mode"
+          }
 
       - name: Build Windows installer
         shell: pwsh
@@ -77,7 +131,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codex-plus-plus-windows-binaries
-          path: dist/windows/app/*
+          path: dist/windows/app/**
           if-no-files-found: error
 
       - name: Upload Windows installer
@@ -114,6 +168,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          target: desktop
+          cache: true
+
+      - name: Configure Qt environment
+        run: |
+          set -euo pipefail
+          test -d "$QT_ROOT_DIR/lib/QtSvg.framework" || test -f "$QT_ROOT_DIR/lib/libQt6Svg.6.dylib"
+          test -f "$QT_ROOT_DIR/lib/cmake/Qt6Svg/Qt6SvgConfig.cmake"
+          echo "CMAKE_PREFIX_PATH=$QT_ROOT_DIR" >> "$GITHUB_ENV"
+          echo "Qt6_DIR=$QT_ROOT_DIR/lib/cmake/Qt6" >> "$GITHUB_ENV"
+          echo "MACDEPLOYQT=$QT_ROOT_DIR/bin/macdeployqt" >> "$GITHUB_ENV"
+
       - name: Install frontend dependencies
         working-directory: apps/codex-plus-manager
         run: npm install --package-lock=false
@@ -122,11 +192,26 @@ jobs:
         working-directory: apps/codex-plus-manager
         run: npm run vite:build
 
-      - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Prepare Flameshot source
+        run: bash scripts/vendor/prepare-flameshot-source.sh
 
-      - name: Bundle Flameshot
-        run: bash scripts/vendor/download-flameshot-macos.sh "${{ matrix.arch }}" "dist/vendor/flameshot/${{ matrix.arch }}"
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }} -p codex-plus-manager
+          cargo build --release --target ${{ matrix.target }} -p codex-plus-launcher --features embedded-flameshot
+
+      - name: Locate embedded Flameshot dylib
+        run: |
+          set -euo pipefail
+          lib="$(find "$PWD/target/${{ matrix.target }}/release/build" \
+            -path "*/out/flameshot-embedded-lib/libcodex_flameshot_embedded.dylib" \
+            -type f \
+            -print \
+            -quit)"
+          test -f "$lib"
+          echo "EMBEDDED_FLAMESHOT_LIB=$lib" >> "$GITHUB_ENV"
+          echo "CODEX_PLUS_EMBEDDED_FLAMESHOT=1" >> "$GITHUB_ENV"
 
       - name: Build macOS DMG
         run: |
@@ -151,7 +236,9 @@ jobs:
             codesign --verify --deep --strict "$app" >/dev/null
             echo "verified: $app"
           done
-          test -x "dist/macos/stage/Codex++.app/Contents/Helpers/Flameshot.app/Contents/MacOS/flameshot"
+          test -f "dist/macos/stage/Codex++.app/Contents/Frameworks/libcodex_flameshot_embedded.dylib"
+          test ! -d "dist/macos/stage/Codex++.app/Contents/Helpers/Flameshot.app"
+          otool -L "dist/macos/stage/Codex++.app/Contents/MacOS/CodexPlusPlus" | grep -F "@rpath/libcodex_flameshot_embedded.dylib"
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4

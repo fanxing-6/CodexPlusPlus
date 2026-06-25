@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -28,6 +28,26 @@ fn target(id: &str, kind: &str, title: &str, url: &str, websocket_url: Option<&s
         url: url.to_string(),
         web_socket_debugger_url: websocket_url.map(str::to_string),
     }
+}
+
+async fn ipv6_loopback_is_connectable() -> bool {
+    let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+        return false;
+    };
+    let Ok(addr) = listener.local_addr() else {
+        return false;
+    };
+    let server = tokio::spawn(async move {
+        let _ = listener.accept().await;
+    });
+
+    let connected = TcpStream::connect(addr).await.is_ok();
+    if connected {
+        let _ = server.await;
+    } else {
+        server.abort();
+    }
+    connected
 }
 
 #[test]
@@ -985,6 +1005,10 @@ fn pick_injectable_codex_page_target_requires_websocket() {
 
 #[tokio::test]
 async fn list_targets_can_query_ipv6_loopback_cdp_endpoint() {
+    if !ipv6_loopback_is_connectable().await {
+        return;
+    }
+
     let listener = TcpListener::bind("[::1]:0")
         .await
         .expect("IPv6 loopback listener should bind");
