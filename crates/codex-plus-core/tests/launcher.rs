@@ -339,10 +339,28 @@ fn launcher_macos_open_command_waits_for_app_exit() {
     let command = build_macos_open_command(Path::new("/Applications/Codex.app"), 9229, &[]);
 
     assert_eq!(command[0], "open");
-    assert!(command.contains(&"-W".to_string()));
-    assert!(command.contains(&"-a".to_string()));
-    assert!(command.contains(&"--args".to_string()));
+    assert_eq!(command[1], "-W");
+    assert_eq!(command[2], "/Applications/Codex.app");
+    assert!(!command.contains(&"-a".to_string()));
+    assert_eq!(command[3], "--args");
     assert!(command.contains(&"--remote-debugging-port=9229".to_string()));
+}
+
+#[test]
+fn launcher_macos_open_command_uses_exact_app_bundle_path() {
+    let command = build_macos_open_command(Path::new("/Applications/OpenAI Codex.app"), 9229, &[]);
+
+    assert_eq!(
+        command,
+        vec![
+            "open".to_string(),
+            "-W".to_string(),
+            "/Applications/OpenAI Codex.app".to_string(),
+            "--args".to_string(),
+            "--remote-debugging-port=9229".to_string(),
+            "--remote-allow-origins=http://127.0.0.1:9229".to_string(),
+        ]
+    );
 }
 
 #[test]
