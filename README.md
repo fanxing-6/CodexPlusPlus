@@ -183,6 +183,7 @@ Telegram 频道：<https://t.me/CodexPlusPlus>
 - 外部 CDP 注入，不改 `app.asar`，不向 Codex 安装目录写入 DLL。
 - 中转注入模式：支持多个中转配置，写入 `CodexPlusPlus` provider，并可切回官方 ChatGPT 登录态。
 - 传统增强模式：插件入口解锁、特殊插件强制安装、会话删除、Markdown 导出、项目移动、Timeline 等。
+- 区域截图按钮：在 Codex 对话框附件入口旁快速框选截图，并自动作为图片附件加入当前输入框。
 - 用户脚本独立管理，可在启动时注入自定义脚本。
 - Provider 同步：启动前同步本地会话 metadata，切换供应商后旧会话仍可见。
 - Zed 打开入口：识别远程 SSH 上下文后，可从 Codex 直接打开对应文件到 Zed Remote Development。
@@ -209,6 +210,14 @@ Codex++ 启动后会解锁插件入口，并在会话列表悬停时显示删除
 
 ![Codex++ 后端状态指示灯](docs/images/backend-status-indicator.png)
 ![Codex++ 设置面板](docs/images/settings-panel.png)
+
+## 区域截图
+
+Codex++ 会在 Codex 对话框左侧的附件入口旁加入截图按钮。点击后会调用内置 Flameshot 打开区域选择界面，框选完成后截图会被转换成当前对话的图片附件，不需要手动保存、复制或再拖入输入框。
+
+截图功能同时提供“截图时隐藏 Codex”选项。开启后，Codex++ 会在截图前临时隐藏 Codex 相关窗口，避免把当前聊天窗口截进图片里；截图结束、取消或失败后会自动恢复窗口。区域选择由内置 Flameshot 处理，支持 Windows 和 macOS 上的多显示器区域框选，并且安装包会携带所需运行时，不需要用户额外安装系统版 Flameshot。
+
+Windows 版本使用常驻截图工作线程承载内置 Flameshot，避免连续截图时 Qt GUI 状态跨线程复用导致第二次不弹出截图窗口。内置 Flameshot 还会在每次截图前清理上一轮区域选择窗口，确保同一 Codex++ 进程中可以连续多次截图。
 
 ## 中转注入
 
